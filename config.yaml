@@ -1,0 +1,44 @@
+server:
+  port: 8190
+  internalToken: "dev-internal-token"
+
+mysql:
+  dsn: "root:root@tcp(127.0.0.1:13306)/ykt_aisaas?charset=utf8mb4&parseTime=true&loc=Local"
+  maxOpenConns: 40
+  maxIdleConns: 10
+  connMaxLifeSec: 3600
+
+postgres:
+  dsn: "postgres://aisaas:aisaas@127.0.0.1:15432/ykt_aisaas_rag"
+  maxConns: 8
+
+redis:
+  addr: "127.0.0.1:16379"
+  password: ""
+  db: 0
+
+crypto:
+  aesKey: "dev-aes-key-32-bytes-1234567890a"
+
+tenant:
+  skipTables:
+    - ykt_aisaas_tenant
+    - ykt_aisaas_plan
+    - ykt_aisaas_dict_type
+    - ykt_aisaas_dict_item
+    - ykt_aisaas_admin_user
+    - ykt_aisaas_admin_role
+    - ykt_aisaas_balance
+    - ykt_aisaas_balance_transaction
+    - ykt_aisaas_internal_tenant_config
+    - ykt_aisaas_model_registry
+
+quota:
+  precheck: true
+
+metering:
+  batchSize: 200
+  flushSec: 3
+
+log:
+  level: info

@@ -1,0 +1,55 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: aisaas-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: ykt_aisaas
+      TZ: Asia/Shanghai
+    ports:
+      - "13306:3306"
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_0900_ai_ci
+    volumes:
+      - aisaas-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: aisaas-pg
+    environment:
+      POSTGRES_USER: aisaas
+      POSTGRES_PASSWORD: aisaas
+      POSTGRES_DB: ykt_aisaas_rag
+      TZ: Asia/Shanghai
+    ports:
+      - "15432:5432"
+    command: postgres -c shared_preload_libraries=vector
+    volumes:
+      - aisaas-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aisaas -d ykt_aisaas_rag"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: aisaas-redis
+    ports:
+      - "16379:6379"
+    volumes:
+      - aisaas-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  aisaas-mysql-data:
+  aisaas-redis-data:
+  aisaas-pg-data:
