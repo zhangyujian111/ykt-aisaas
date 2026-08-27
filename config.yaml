@@ -32,6 +32,9 @@ tenant:
     - ykt_aisaas_balance_transaction
     - ykt_aisaas_internal_tenant_config
     - ykt_aisaas_model_registry
+    - ykt_aisaas_user
+    - ykt_aisaas_user_device
+    - ykt_aisaas_recharge_order
 
 quota:
   precheck: true

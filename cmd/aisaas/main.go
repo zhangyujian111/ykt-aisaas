@@ -25,8 +25,10 @@ import (
 	"ykt.dev/aisaas/internal/platform/metering"
 	"ykt.dev/aisaas/internal/platform/quota"
 	"ykt.dev/aisaas/internal/platform/redisx"
+	"ykt.dev/aisaas/internal/portal"
 	"ykt.dev/aisaas/internal/rag"
 	"ykt.dev/aisaas/internal/server"
+	"ykt.dev/aisaas/internal/tenantm"
 	"ykt.dev/aisaas/internal/tenantm/apikey"
 )
 
@@ -102,6 +104,9 @@ func main() {
 	mcpSvc := mcp.NewService(mcpRepo, meter)
 
 	billingSvc := billing.NewService(db)
+
+	deviceTenantSvc := tenantm.NewDeviceTenantService(db, rdb)
+	portalSvc := portal.NewService(db, billingSvc, cfg.Crypto.AESKey)
 	quotaLoader := billing.NewQuotaLoader(db, rdb)
 	if n, err := quotaLoader.LoadAll(context.Background()); err != nil {
 		slog.Error("quota load", "err", err)
@@ -120,6 +125,7 @@ func main() {
 		RagRepo: ragRepo, RagSvc: ragSvc, RagIngest: ragIngest, RagRetriever: ragRetriever,
 		McpRepo: mcpRepo, McpSvc: mcpSvc,
 		BillingSvc: billingSvc, QuotaLoader: quotaLoader,
+		DeviceTenant: deviceTenantSvc, PortalSvc: portalSvc,
 	})
 
 	srv := &http.Server{

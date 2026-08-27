@@ -16,10 +16,13 @@ import (
 	"ykt.dev/aisaas/internal/platform/metering"
 	"ykt.dev/aisaas/internal/platform/quota"
 	"ykt.dev/aisaas/internal/platform/web"
+	"ykt.dev/aisaas/internal/portal"
 	"ykt.dev/aisaas/internal/rag"
 	"ykt.dev/aisaas/internal/server/apiv1"
 	"ykt.dev/aisaas/internal/server/internalapi"
+	"ykt.dev/aisaas/internal/server/portalapi"
 	v1 "ykt.dev/aisaas/internal/server/v1"
+	"ykt.dev/aisaas/internal/tenantm"
 	"ykt.dev/aisaas/internal/tenantm/apikey"
 	"ykt.dev/aisaas/internal/tts"
 )
@@ -41,6 +44,8 @@ type Deps struct {
 	McpSvc       *mcp.Service
 	BillingSvc   *billing.Service
 	QuotaLoader  *billing.QuotaLoader
+	DeviceTenant *tenantm.DeviceTenantService
+	PortalSvc    *portal.Service
 }
 
 // NewRouter 装配全部路由。
@@ -103,6 +108,28 @@ func NewRouter(d *Deps) *gin.Engine {
 	intH := &internalapi.Handler{KeySvc: d.APIKeySvc, Billing: d.BillingSvc}
 	intg.POST("/tenants/:tenantId/apikeys", intH.IssueAPIKey)
 	intg.POST("/tenants/:tenantId/recharge", intH.Recharge)
+
+	// xiaozhi-server 设备即租户通道：X-Device-Id 自动开户 + 独立计量计费
+	devg := r.Group("/internal/xiaozhi/v1", auth.InternalDeviceMiddleware(d.Cfg.Server.InternalToken, d.DeviceTenant))
+	devChat := v1.NewChatHandler(d.ChatSvc, d.Quota, d.Meter, d.RagRetriever, d.McpSvc)
+	devg.POST("/chat/completions", devChat.Completions)
+	devAudio := &v1.AudioHandler{Tts: tts.New(d.Registry), Asr: asr.New(d.Registry), Quota: d.Quota, Meter: d.Meter}
+	devg.POST("/audio/speech", devAudio.Speech)
+	devg.POST("/audio/transcriptions", devAudio.Transcriptions)
+
+	// 用户门户（JWT）
+	portalH := &portalapi.Handler{Svc: d.PortalSvc}
+	pg := r.Group("/portal/api/v1")
+	pg.POST("/auth/register", portalH.Register)
+	pg.POST("/auth/login", portalH.Login)
+	authed := pg.Group("", portalH.JWTMiddleware())
+	authed.GET("/devices", portalH.MyDevices)
+	authed.POST("/devices/bind", portalH.BindDevice)
+	authed.GET("/plans", portalH.Plans)
+	authed.POST("/devices/:tenantId/subscribe", portalH.Subscribe)
+	authed.POST("/devices/:tenantId/recharge", portalH.CreateOrder)
+	authed.POST("/orders/:id/pay-mock", portalH.PayOrderMock)
+	authed.GET("/orders", portalH.MyOrders)
 	// device-sessions / bulk-import 后续模块接入
 
 	// ---- 404 ----

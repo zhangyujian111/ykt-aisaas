@@ -21,6 +21,9 @@ YKT AI SaaS 平台 Go 实现（v0.1 可运行版本）。
 | **MCP×Chat**：`x-tools-mcp` 装载工具 + tool_calls 循环（5 轮上限）+ `x-tool-call` 事件 | ✅ |
 | **计费闭环**：配额自动加载（启动+每小时）→ 按模型价格扣余额 → 流水 → 用量/余额查询 | ✅ |
 | 充值（管理端记账版）`POST /internal/api/v1/tenants/:id/recharge` | ✅ |
+| **设备即租户**：xiaozhi-server 带 `X-Device-Id` 调 `/internal/xiaozhi/v1/*`，自动开户+独立计量计费 | ✅ |
+| **用户门户**：注册/登录(JWT)/绑定设备/用量展示/订阅套餐/充值下单+支付确认 | ✅ |
+| Web 控制台（Vue3+ElementPlus :8191） | ✅ |
 | 模型注册表（全局/租户私有路由，AES-GCM 密钥加密） | ✅ |
 | 配额预扣（Redis Lua 原子预扣 + 402 拒绝） | ✅ |
 | 计量（Redis 实时计数 + 批量异步落库 usage_detail） | ✅ |
@@ -91,6 +94,17 @@ curl -X POST http://127.0.0.1:8190/api/v1/knowledge-bases/$KB/documents \
 curl -X POST http://127.0.0.1:8190/api/v1/knowledge-bases/$KB/search \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"query":"怎么连WiFi","topK":3}'
+
+# 设备即租户（xiaozhi-server 调用方式）
+curl -X POST http://127.0.0.1:8190/internal/xiaozhi/v1/chat/completions \
+  -H "X-Internal-Token: dev-internal-token" -H "X-Device-Id: device-abc-001" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"demo-chat","messages":[{"role":"user","content":"你好"}]}'
+# 首次调用自动为设备开户（租户+免费配额+6位绑定码），每台设备独立计量计费。
+# 用户在 Web 控制台用绑定码认领设备 → 订阅套餐 → 充值。
+
+# 用户前端（Vue3）
+cd web && npm install && npm run dev   # :8191，登录/绑定/用量/订阅/充值
 
 # 计费：充值 → 调用扣费 → 查用量/余额
 curl -X POST http://127.0.0.1:8190/internal/api/v1/tenants/1001/recharge \

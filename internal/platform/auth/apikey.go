@@ -183,8 +183,9 @@ type actorCtxKey struct{}
 
 // Actor 调用者身份。
 type Actor struct {
-	Type string // apikey / internal / user
+	Type string // apikey / internal / device / user
 	ID   int64
+	Name string // 设备身份时为 deviceId
 }
 
 // ActorFrom 从 ctx 取 Actor。

@@ -23,22 +23,22 @@ import (
 // ModelDO ykt_aisaas_model_registry（tenantId IS NULL = 全局模型）。
 // 表在租户豁免名单（跨租户共享读），查询显式带租户条件。
 type ModelDO struct {
-	ID            int64     `gorm:"column:id;primaryKey"`
-	TenantID      *int64    `gorm:"column:tenantId"`
-	ModelID       string    `gorm:"column:modelId"`
-	Provider      string    `gorm:"column:provider"`
-	BaseURL       string    `gorm:"column:baseUrl"`
-	APIKeyEnc     string    `gorm:"column:apiKeyEnc"`
-	UpstreamModel string    `gorm:"column:upstreamModel"`
-	Type          string    `gorm:"column:type"` // chat/embedding/tts/asr
-	Modality      string    `gorm:"column:modality"`
-	ContextLength int       `gorm:"column:contextLength"`
-	PriceInputCents  float64 `gorm:"column:priceInputCents"`
-	PriceOutputCents float64 `gorm:"column:priceOutputCents"`
-	IsDefault     int8      `gorm:"column:isDefault"`
-	Status        int8      `gorm:"column:status"`
-	CreateTime    time.Time `gorm:"column:createTime"`
-	UpdateTime    time.Time `gorm:"column:updateTime"`
+	ID               int64     `gorm:"column:id;primaryKey"`
+	TenantID         *int64    `gorm:"column:tenantId"`
+	ModelID          string    `gorm:"column:modelId"`
+	Provider         string    `gorm:"column:provider"`
+	BaseURL          string    `gorm:"column:baseUrl"`
+	APIKeyEnc        string    `gorm:"column:apiKeyEnc"`
+	UpstreamModel    string    `gorm:"column:upstreamModel"`
+	Type             string    `gorm:"column:type"` // chat/embedding/tts/asr
+	Modality         string    `gorm:"column:modality"`
+	ContextLength    int       `gorm:"column:contextLength"`
+	PriceInputCents  float64   `gorm:"column:priceInputCents"`
+	PriceOutputCents float64   `gorm:"column:priceOutputCents"`
+	IsDefault        int8      `gorm:"column:isDefault"`
+	Status           int8      `gorm:"column:status"`
+	CreateTime       time.Time `gorm:"column:createTime"`
+	UpdateTime       time.Time `gorm:"column:updateTime"`
 }
 
 func (ModelDO) TableName() string { return "ykt_aisaas_model_registry" }
