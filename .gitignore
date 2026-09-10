@@ -3,3 +3,8 @@ bin/
 nohup.out
 node_modules/
 dist/
+
+# 构建产物
+*.exe
+*.exe~
+*.test

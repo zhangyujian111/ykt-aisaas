@@ -1,0 +1,1433 @@
+openapi: 3.1.0
+
+info:
+  title: ykt-aisaas V2 API
+  description: |
+    ykt-aisaas V2 API 规范，覆盖 Memory、Persona、Session、API Key 生命周期与 Audit 模块。
+
+    ## 鉴权方式
+    - `/api/v1/*` — API Key Bearer 鉴权（scope 校验）
+    - `/internal/api/v1/*` — X-Internal-Token + loopback IP 鉴权（仅限内部超级租户）
+
+    ## 错误响应
+    - **SaaS 自有接口**（/api/v1/*）：统一信封 `{ code, message, requestId, data }`
+    - **OpenAI 兼容接口**（/v1/*）：`{ error: { message, type, code }, requestId }`
+  version: 2.0.0
+  contact:
+    name: ykt-aisaas Team
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://localhost:8090
+    description: Local development
+  - url: https://api.aisaas.ykt.cn
+    description: Production
+
+tags:
+  - name: memory
+    description: 记忆模块（短期消息写入 + 长期图谱查询 + 异步抽取/摘要）
+  - name: persona
+    description: 人设模块（读取/查询 persona）
+  - name: session
+    description: 会话模块（创建会话含配额快照、借记/结算退款）
+  - name: apikey
+    description: API Key 生命周期管理（内部接口）
+  - name: audit
+    description: 审计日志（内部接口，限超级租户）
+  - name: internal
+    description: 内部通用接口
+
+paths:
+  # ============================================================
+  # Memory 模块（5 个接口）
+  # ============================================================
+
+  /api/v1/memories/{deviceId}/messages:
+    post:
+      tags: [memory]
+      operationId: writeMemoryMessage
+      summary: 写入短期会话消息
+      description: |
+        将单条消息写入短期记忆存储。可选传入 sessionId，不传则系统自动创建新会话。
+        消息经存储后返回全局唯一 ID 与创建时间戳。
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/deviceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WriteMemoryMessageRequest'
+      responses:
+        '200':
+          description: 消息写入成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WriteMemoryMessageResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/QuotaExceeded'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags: [memory]
+      operationId: listMemoryMessages
+      summary: 列出会话消息
+      description: |
+        按 deviceId 分页拉取短期会话消息记录，按创建时间倒序。
+        支持 limit 控制返回条数，cursor 用于游标翻页。
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/deviceId'
+        - name: limit
+          in: query
+          description: 返回消息条数上限（1-200）
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+        - name: cursor
+          in: query
+          description: 游标分页（base64 编码的上一页最后一条消息 ID）
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 消息列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListMemoryMessagesResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/memories/{deviceId}:
+    get:
+      tags: [memory]
+      operationId: getMemoryGraph
+      summary: 拉取长期记忆图谱
+      description: |
+        聚合设备短期记忆，生成并返回长期记忆图谱（实体-关系网络）。
+        包含实体列表、偏好摘要、事件时间线等结构化记忆。
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/deviceId'
+        - name: limit
+          in: query
+          description: 返回实体数量上限
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+        - name: dimension
+          in: query
+          description: 图谱维度筛选（空=全部维度）
+          schema:
+            type: string
+            enum: [entity, preference, event, skill]
+      responses:
+        '200':
+          description: 记忆图谱
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryGraphResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/memories/{deviceId}/extract:
+    post:
+      tags: [memory]
+      operationId: extractMemoryEntities
+      summary: 异步抽取实体
+      description: |
+        对指定消息列表异步执行实体抽取（命名实体识别、偏好挖掘、事件抽取）。
+        返回任务 ID，调用方需通过任务 ID 轮询或等待回调。
+        Q3 决策：抽取维度由 extractTypes 指定。
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/deviceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExtractMemoryRequest'
+      responses:
+        '200':
+          description: 抽取任务已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtractMemoryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/QuotaExceeded'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/memories/{deviceId}/summarize:
+    post:
+      tags: [memory]
+      operationId: summarizeMemory
+      summary: 异步摘要聚合
+      description: |
+        对设备记忆异步生成摘要聚合（会话摘要、主题聚类、关键事件）。
+        返回任务 ID，调用方需通过任务 ID 轮询或等待回调。
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/deviceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SummarizeMemoryRequest'
+      responses:
+        '200':
+          description: 摘要任务已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SummarizeMemoryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/QuotaExceeded'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ============================================================
+  # Persona 模块（2 个接口）
+  # ============================================================
+
+  /api/v1/personas/{id}:
+    get:
+      tags: [persona]
+      operationId: getPersona
+      summary: 读取人设详情
+      description: 按 persona ID 读取完整人设配置（含系统提示词、技能列表、元数据）。
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Persona 全局唯一 ID
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Persona 详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Persona'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/personas:
+    get:
+      tags: [persona]
+      operationId: listPersonas
+      summary: 按设备查询默认 Persona
+      description: |
+        查询指定设备对应的默认 Persona（含 persona_bind 绑定关系）。
+        若设备有多个绑定优先返回默认标识为 true 的记录。
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: deviceId
+          in: query
+          required: true
+          description: 设备 ID
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: 返回条数上限
+          schema:
+            type: integer
+            default: 10
+            minimum: 1
+            maximum: 50
+      responses:
+        '200':
+          description: Persona 列表（包含绑定关系）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListPersonasResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ============================================================
+  # Session 模块（3 个接口）
+  # ============================================================
+
+  /api/v1/sessions/{deviceId}:
+    post:
+      tags: [session]
+      operationId: createSession
+      summary: 创建会话（含配额快照借记）
+      description: |
+        创建设备会话并预借配额（quota_snapshot）。
+        Q8 决策：创建时从设备配额中借记 quotaInitial，返回借记后设备配额快照。
+        dimension 指定借记维度（如 llm_tokens_in），会话结束后通过 /sessions/{sessionId}/end 结算实际消耗并退款。
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/deviceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+      responses:
+        '200':
+          description: 会话创建成功（含配额快照）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateSessionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/QuotaExceeded'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/sessions/{deviceId}/history:
+    get:
+      tags: [session]
+      operationId: getSessionHistory
+      summary: 拉取会话历史
+      description: 按设备拉取最近 N 轮对话记录，返回完整消息列表（user + assistant）。
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/deviceId'
+        - name: limit
+          in: query
+          description: 返回轮数上限（每轮含 user + assistant）
+          schema:
+            type: integer
+            default: 10
+            minimum: 1
+            maximum: 100
+        - name: cursor
+          in: query
+          description: 游标分页
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 会话历史
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionHistoryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/sessions/{sessionId}/end:
+    post:
+      tags: [session]
+      operationId: endSession
+      summary: 结算会话实际消耗（含配额退款）
+      description: |
+        结算会话实际消耗并退还剩余配额。
+        Q8 决策：actualCost 包含实际消耗字段，quotaRefunded 为应退金额。
+        status 为 failed 时标记会话异常结束，消耗按实际计入。
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          description: 会话全局唯一 ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EndSessionRequest'
+      responses:
+        '200':
+          description: 会话已结算
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EndSessionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ============================================================
+  # Internal APIKey 模块（2 个接口，Q6 决策）
+  # ============================================================
+
+  /internal/api/v1/apikeys/{keyId}/rotate:
+    post:
+      tags: [apikey]
+      operationId: rotateApiKey
+      summary: API Key 轮换（带 5 分钟宽限期）
+      description: |
+        轮换指定 API Key。Q6 决策：
+        - 生成新 Key，有效期由 expireDays 指定
+        - 旧 Key 保留 5 分钟宽限期（oldKeyExpiresAt）后自动失效
+        - 新 Key 明文仅此一次返回（newApiKey），之后仅显示前缀
+        - rotateStrategy 控制宽限期策略：time_24h | on_use_count | manual
+      security:
+        - InternalTokenAuth: []
+      parameters:
+        - name: keyId
+          in: path
+          required: true
+          description: 待轮换的 API Key ID
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateApiKeyRequest'
+      responses:
+        '200':
+          description: 轮换成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RotateApiKeyResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /internal/api/v1/apikeys/{keyId}/revoke:
+    post:
+      tags: [apikey]
+      operationId: revokeApiKey
+      summary: API Key 紧急撤销
+      description: |
+        立即撤销指定 API Key，缓存失效，无宽限期。
+        Q6 决策：用于安全事件响应，撤销后 Key 立即失效。
+      security:
+        - InternalTokenAuth: []
+      parameters:
+        - name: keyId
+          in: path
+          required: true
+          description: 待撤销的 API Key ID
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeApiKeyRequest'
+      responses:
+        '200':
+          description: 撤销成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevokeApiKeyResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ============================================================
+  # Internal Audit 模块（1 个接口，Q6 决策）
+  # ============================================================
+
+  /internal/api/v1/audit-logs:
+    get:
+      tags: [audit]
+      operationId: queryAuditLogs
+      summary: 查询审计日志
+      description: |
+        内部超级租户查询审计日志。Q6 决策：支持多条件筛选，含 cursor 分页。
+        仅限 loopback IP 的内部服务调用。
+      security:
+        - InternalTokenAuth: []
+      parameters:
+        - name: actor_type
+          in: query
+          description: 行为者类型
+          schema:
+            type: string
+            enum: [device, user, api_key, system]
+        - name: tenant_id
+          in: query
+          description: 租户 ID 筛选
+          schema:
+            type: integer
+            format: int64
+        - name: event_time_start
+          in: query
+          description: 事件时间范围起（ISO 8601）
+          schema:
+            type: string
+            format: date-time
+        - name: event_time_end
+          in: query
+          description: 事件时间范围止（ISO 8601）
+          schema:
+            type: string
+            format: date-time
+        - name: action
+          in: query
+          description: 事件动作筛选
+          schema:
+            type: string
+        - name: result
+          in: query
+          description: 事件结果
+          schema:
+            type: string
+            enum: [success, failure]
+        - name: limit
+          in: query
+          description: 每页条数
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 500
+        - name: cursor
+          in: query
+          description: 游标分页
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 审计日志列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLogResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  # ============================================================
+  # Security Schemes
+  # ============================================================
+  securitySchemes:
+    ApiKeyAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API-Key
+      description: |
+        SaaS 自有接口鉴权。调用方在 Authorization header 中传入 `Bearer <api_key>`。
+        API Key 需具有对应 scope 权限。
+      x-scope: required
+
+    InternalTokenAuth:
+      type: apiKey
+      in: header
+      name: X-Internal-Token
+      description: |
+        内部超级租户接口鉴权。
+        仅允许来自 loopback IP（127.0.0.0/8, ::1）的请求。
+        Token 由平台运营后台生成，按租户隔离。
+
+    JWTAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 用户门户（/portal/api/v1/*）JWT 鉴权
+
+  # ============================================================
+  # Parameters
+  # ============================================================
+  parameters:
+    deviceId:
+      name: deviceId
+      in: path
+      required: true
+      description: 设备唯一标识（MAC 地址哈希或平台分配 ID）
+      schema:
+        type: string
+
+    sessionId:
+      name: sessionId
+      in: path
+      required: true
+      description: 会话全局唯一 ID（UUID v7）
+      schema:
+        type: string
+        format: uuid
+
+  # ============================================================
+  # Reusable Schemas
+  # ============================================================
+  schemas:
+    # ----- 通用 -----
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          description: 错误码（与 errs.ErrorCode 对应）
+          example: 40001
+        message:
+          type: string
+          description: 错误描述
+          example: 参数错误
+        requestId:
+          type: string
+          description: 请求追踪 ID
+          example: req_a1b2c3d4
+        data:
+          type: object
+          description: 详细错误信息（可选）
+
+    ErrorOpenAI:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [message, type, code]
+          properties:
+            message:
+              type: string
+              description: 错误描述
+              example: Invalid API key
+            type:
+              type: string
+              description: 错误类型
+              example: aisaas_error
+            code:
+              type: string
+              description: 错误码（字符串形式）
+              example: "40101"
+        requestId:
+          type: string
+          description: 请求追踪 ID
+          example: req_a1b2c3d4
+
+    # ----- Memory 模块 -----
+    WriteMemoryMessageRequest:
+      type: object
+      required: [role, content]
+      properties:
+        sessionId:
+          type: string
+          description: 会话 ID（可选，不传则创建新会话）
+          example: "sess_abc123"
+        role:
+          type: string
+          enum: [user, assistant, system]
+          description: 消息角色
+          example: user
+        content:
+          type: string
+          description: 消息内容
+          example: "今天天气真不错"
+        metadata:
+          type: object
+          description: 元数据（如模型、token 数）
+          properties:
+            model:
+              type: string
+              example: gpt-4o
+            tokens:
+              type: integer
+              example: 128
+            latencyMs:
+              type: integer
+
+    WriteMemoryMessageResponse:
+      type: object
+      required: [id, sessionId, createdAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: 消息全局唯一 ID
+          example: 123456789
+        sessionId:
+          type: string
+          description: 所属会话 ID
+          example: "sess_abc123"
+        createdAt:
+          type: string
+          format: date-time
+          description: 创建时间（ISO 8601）
+          example: "2026-09-02T12:34:56.789Z"
+
+    ListMemoryMessagesResponse:
+      type: object
+      required: [items, hasMore]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryMessage'
+        hasMore:
+          type: boolean
+          description: 是否有更多消息
+        nextCursor:
+          type: string
+          description: 下一页游标
+
+    MemoryMessage:
+      type: object
+      required: [id, sessionId, role, content, createdAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 123456789
+        sessionId:
+          type: string
+          example: "sess_abc123"
+        role:
+          type: string
+          enum: [user, assistant, system]
+        content:
+          type: string
+        metadata:
+          type: object
+          properties:
+            model:
+              type: string
+            tokens:
+              type: integer
+            latencyMs:
+              type: integer
+        createdAt:
+          type: string
+          format: date-time
+
+    MemoryGraphResponse:
+      type: object
+      required: [deviceId, entities, updatedAt]
+      properties:
+        deviceId:
+          type: string
+        entities:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryEntity'
+        preferences:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryPreference'
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryEvent'
+        updatedAt:
+          type: string
+          format: date-time
+
+    MemoryEntity:
+      type: object
+      required: [id, type, name, confidence]
+      properties:
+        id:
+          type: string
+          description: 实体 ID
+        type:
+          type: string
+          enum: [person, place, object, organization, concept]
+          description: 实体类型
+        name:
+          type: string
+          description: 实体名称
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        mentions:
+          type: array
+          items:
+            type: string
+          description: 提及上下文
+        attributes:
+          type: object
+          additionalProperties: true
+
+    MemoryPreference:
+      type: object
+      required: [dimension, value, confidence]
+      properties:
+        dimension:
+          type: string
+          description: 偏好维度
+        value:
+          type: string
+          description: 偏好值
+        confidence:
+          type: number
+          format: float
+        sourceMessages:
+          type: array
+          items:
+            type: integer
+            format: int64
+
+    MemoryEvent:
+      type: object
+      required: [eventType, eventTime, description]
+      properties:
+        id:
+          type: string
+        eventType:
+          type: string
+          enum: [appointment, task, reminder, interaction, custom]
+        eventTime:
+          type: string
+          format: date-time
+        description:
+          type: string
+        participants:
+          type: array
+          items:
+            type: string
+        metadata:
+          type: object
+          additionalProperties: true
+
+    ExtractMemoryRequest:
+      type: object
+      required: [messages, extractTypes]
+      properties:
+        sessionId:
+          type: string
+          description: 指定会话（可选）
+        messages:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [role, content]
+            properties:
+              role:
+                type: string
+                enum: [user, assistant, system]
+              content:
+                type: string
+        extractTypes:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [entity, preference, event, skill]
+          description: 抽取维度
+
+    ExtractMemoryResponse:
+      type: object
+      required: [taskId, status, estimatedEntities]
+      properties:
+        taskId:
+          type: string
+          format: uuid
+          description: 异步任务 ID
+        status:
+          type: string
+          enum: [pending, running, completed, failed]
+        estimatedEntities:
+          type: integer
+          description: 估计抽取的实体数量
+        createdAt:
+          type: string
+          format: date-time
+
+    SummarizeMemoryRequest:
+      type: object
+      properties:
+        sessionId:
+          type: string
+        summarizeTypes:
+          type: array
+          items:
+            type: string
+            enum: [conversation, topic, key_event, personality]
+          default: [conversation, topic]
+        topicFocus:
+          type: string
+          description: 聚焦特定话题（可选）
+
+    SummarizeMemoryResponse:
+      type: object
+      required: [taskId, status]
+      properties:
+        taskId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, running, completed, failed]
+        createdAt:
+          type: string
+          format: date-time
+
+    # ----- Persona 模块 -----
+    Persona:
+      type: object
+      required: [id, name, version, createdAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Persona 全局唯一 ID
+        name:
+          type: string
+          description: 人设名称
+          example: 小智助手
+        version:
+          type: string
+          description: 版本号
+          example: "1.0"
+        systemPrompt:
+          type: string
+          description: 系统提示词
+        skills:
+          type: array
+          items:
+            $ref: '#/components/schemas/PersonaSkill'
+        metadata:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    PersonaSkill:
+      type: object
+      required: [id, name, type]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+          enum: [tool, knowledge, action]
+        config:
+          type: object
+          additionalProperties: true
+
+    PersonaBind:
+      type: object
+      required: [personaId, deviceId, isDefault]
+      properties:
+        bindId:
+          type: integer
+          format: int64
+        personaId:
+          type: integer
+          format: int64
+        deviceId:
+          type: string
+        isDefault:
+          type: boolean
+        boundAt:
+          type: string
+          format: date-time
+
+    ListPersonasResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PersonaWithBind'
+        hasMore:
+          type: boolean
+
+    PersonaWithBind:
+      allOf:
+        - $ref: '#/components/schemas/Persona'
+        - type: object
+          properties:
+            persona_bind:
+              $ref: '#/components/schemas/PersonaBind'
+
+    # ----- Session 模块 -----
+    CreateSessionRequest:
+      type: object
+      required: [dimension, quotaInitial]
+      properties:
+        deviceId:
+          type: string
+          description: 设备 ID（路径参数同步）
+        dimension:
+          type: string
+          enum: [llm_tokens_in, llm_tokens_out, tts_chars, asr_seconds]
+          description: 借记维度
+          example: llm_tokens_in
+        quotaInitial:
+          type: integer
+          description: 申请借记量
+          minimum: 1
+          example: 2048
+        personaId:
+          type: integer
+          format: int64
+          description: 关联的 Persona ID（可选）
+        metadata:
+          type: object
+          properties:
+            ip:
+              type: string
+              description: 客户端 IP
+            userAgent:
+              type: string
+            dimension:
+              type: string
+
+    CreateSessionResponse:
+      type: object
+      required: [sessionId, deviceId, dimension, quotaInitial, quotaRemaining, quotaSnapshot, createdAt]
+      properties:
+        sessionId:
+          type: string
+          format: uuid
+          description: 会话 ID
+        deviceId:
+          type: string
+        dimension:
+          type: string
+          enum: [llm_tokens_in, llm_tokens_out, tts_chars, asr_seconds]
+        quotaInitial:
+          type: integer
+          description: 申请借记量
+        quotaRemaining:
+          type: integer
+          description: 借记后剩余配额
+        quotaSnapshot:
+          $ref: '#/components/schemas/QuotaSnapshot'
+        createdAt:
+          type: string
+          format: date-time
+
+    QuotaSnapshot:
+      type: object
+      required: [tenantId, deviceQuotaLimit, deviceQuotaUsed, snapshotTime]
+      description: Q8 决策：设备配额快照（创建会话时借记快照）
+      properties:
+        tenantId:
+          type: integer
+          format: int64
+          description: 所属租户 ID
+        deviceQuotaLimit:
+          type: integer
+          description: 设备配额上限
+        deviceQuotaUsed:
+          type: integer
+          description: 设备已使用量
+        deviceQuotaRemaining:
+          type: integer
+          description: 设备剩余配额
+        snapshotTime:
+          type: string
+          format: date-time
+
+    SessionHistoryResponse:
+      type: object
+      required: [sessionId, items, hasMore]
+      properties:
+        sessionId:
+          type: string
+          format: uuid
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SessionMessage'
+        hasMore:
+          type: boolean
+        nextCursor:
+          type: string
+
+    SessionMessage:
+      type: object
+      required: [id, role, content, createdAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        role:
+          type: string
+          enum: [user, assistant, system]
+        content:
+          type: string
+        metadata:
+          type: object
+          properties:
+            model:
+              type: string
+            tokens:
+              type: integer
+        createdAt:
+          type: string
+          format: date-time
+
+    EndSessionRequest:
+      type: object
+      required: [actualCost, status]
+      properties:
+        actualCost:
+          $ref: '#/components/schemas/QuotaUsage'
+        status:
+          type: string
+          enum: [success, failed]
+          description: 会话结束状态
+
+    EndSessionResponse:
+      type: object
+      required: [sessionId, quotaUsed, quotaRefunded, endedAt]
+      properties:
+        sessionId:
+          type: string
+          format: uuid
+        quotaUsed:
+          $ref: '#/components/schemas/QuotaUsage'
+        quotaRefunded:
+          $ref: '#/components/schemas/QuotaUsage'
+          description: 实际退款量（quotaInitial - quotaUsed）
+        endedAt:
+          type: string
+          format: date-time
+
+    QuotaUsage:
+      type: object
+      description: 配额使用量（支持多维度）
+      properties:
+        llm_tokens_in:
+          type: integer
+        llm_tokens_out:
+          type: integer
+        tts_chars:
+          type: integer
+        asr_seconds:
+          type: integer
+      example:
+        llm_tokens_in: 1500
+        llm_tokens_out: 800
+
+    # ----- API Key 模块 -----
+    RotateApiKeyRequest:
+      type: object
+      required: [expireDays]
+      properties:
+        expireDays:
+          type: integer
+          description: 新 Key 有效期（天）
+          minimum: 1
+          example: 1
+        rotateStrategy:
+          type: string
+          enum: [time_24h, on_use_count, manual]
+          default: time_24h
+          description: 轮换策略
+
+    RotateApiKeyResponse:
+      type: object
+      required: [oldKeyId, oldKeyExpiresAt, newKeyId, newApiKey, newKeyPrefix, newKeyExpiresAt]
+      properties:
+        oldKeyId:
+          type: integer
+          format: int64
+          description: 旧 Key ID
+        oldKeyExpiresAt:
+          type: string
+          format: date-time
+          description: 旧 Key 失效时间（5分钟宽限期后）
+        newKeyId:
+          type: integer
+          format: int64
+          description: 新 Key ID
+        newApiKey:
+          type: string
+          description: 新 Key 明文（仅此一次返回）
+          example: sk-aisaas-K5x9mN2pQr4tUv8wXy3zA1bCdEfGhJkL
+        newKeyPrefix:
+          type: string
+          description: 新 Key 前缀（用于识别）
+          example: sk-aisaas-K5x9mN2p...
+        newKeyExpiresAt:
+          type: string
+          format: date-time
+          description: 新 Key 过期时间
+
+    RevokeApiKeyRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          description: 撤销原因（记录到审计日志）
+
+    RevokeApiKeyResponse:
+      type: object
+      required: [keyId, revokedAt]
+      properties:
+        keyId:
+          type: integer
+          format: int64
+        revokedAt:
+          type: string
+          format: date-time
+        reason:
+          type: string
+
+    # ----- Audit 模块 -----
+    AuditLogResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditLogEntry'
+        hasMore:
+          type: boolean
+        nextCursor:
+          type: string
+
+    AuditLogEntry:
+      type: object
+      required: [eventId, actorType, action, result, eventTime]
+      properties:
+        eventId:
+          type: string
+          format: uuid
+          description: 事件 ID（UUID v7）
+        actorType:
+          type: string
+          enum: [device, user, api_key, system]
+          description: 行为者类型
+        actorId:
+          type: string
+          description: 行为者 ID
+          example: "device-mac-a1b2c3d4"
+        actorIp:
+          type: string
+          description: 行为者 IP
+          example: "192.168.1.100"
+        action:
+          type: string
+          description: 事件动作
+          example: "auth.fail"
+        actionDetail:
+          type: object
+          description: 动作详情
+          properties:
+            reason:
+              type: string
+            extra:
+              type: object
+        result:
+          type: string
+          enum: [success, failure]
+        eventTime:
+          type: string
+          format: date-time
+        traceId:
+          type: string
+          description: 分布式追踪 ID
+        region:
+          type: string
+          description: 区域标识
+          example: cn-east-1
+
+  # ============================================================
+  # Reusable Responses
+  # ============================================================
+  responses:
+    BadRequest:
+      description: 参数错误或请求体解析失败
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: 40001
+            message: 参数错误
+            requestId: req_a1b2c3d4
+
+    Unauthorized:
+      description: 认证失败（API Key 无效或已过期）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: 40101
+            message: API Key 无效
+            requestId: req_a1b2c3d4
+
+    QuotaExceeded:
+      description: 配额不足
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: 40201
+            message: 配额不足
+            requestId: req_a1b2c3d4
+
+    RateLimited:
+      description: 请求过于频繁
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: 40203
+            message: 请求过于频繁
+            requestId: req_a1b2c3d4
+
+    Forbidden:
+      description: 权限不足
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: 40302
+            message: 权限不足
+            requestId: req_a1b2c3d4
+
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: 40404
+            message: 资源不存在
+            requestId: req_a1b2c3d4
+
+    Conflict:
+      description: 资源已存在或状态冲突
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: 40901
+            message: 资源已存在
+            requestId: req_a1b2c3d4
+
+    InternalError:
+      description: 系统内部错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: 50002
+            message: 系统内部错误
+            requestId: req_a1b2c3d4

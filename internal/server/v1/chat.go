@@ -3,6 +3,7 @@ package v1
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -12,6 +13,8 @@ import (
 	"ykt.dev/aisaas/internal/platform/errs"
 	"ykt.dev/aisaas/internal/platform/metering"
 	"ykt.dev/aisaas/internal/platform/quota"
+	"ykt.dev/aisaas/internal/platform/redisx"
+	"ykt.dev/aisaas/internal/platform/tenant"
 	"ykt.dev/aisaas/internal/platform/web"
 	"ykt.dev/aisaas/internal/rag"
 	"ykt.dev/aisaas/pkg/openaiclient"
@@ -102,7 +105,8 @@ func (h *ChatHandler) Completions(c *gin.Context) {
 	}
 
 	// 配额预扣（估算：输入 token ≈ 字符数/2，上限 2048 预扣）
-	if !h.Quota.Precheck(ctx, quota.EstimateChat(body.Messages)) {
+	estimated := quota.EstimateChat(body.Messages)
+	if !h.Quota.Precheck(ctx, estimated) {
 		web.AbortOpenAI(c, errs.New(errs.QuotaExceeded))
 		return
 	}
@@ -121,12 +125,13 @@ func (h *ChatHandler) Completions(c *gin.Context) {
 	}
 
 	if body.Stream {
-		h.stream(c, resolved, upReq, citations)
+		h.stream(c, resolved, upReq, citations, estimated)
 		return
 	}
 
 	resp, err := resolved.Client.Complete(ctx, upReq)
 	if err != nil {
+		h.handleChatRefund(ctx, c, resolved, estimated, 0)
 		h.Meter.RecordWithCtx(ctx, metering.Record{
 			BizType: metering.BizLLM, Dimension: metering.DimLLMTokensIn,
 			ModelID: resolved.ModelID, Status: 0, RequestID: web.RequestID(c),
@@ -136,6 +141,8 @@ func (h *ChatHandler) Completions(c *gin.Context) {
 	}
 
 	h.recordUsage(c, resolved, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+	// 成功后按实际用量退款
+	h.handleChatRefund(ctx, c, resolved, estimated, int64(resp.Usage.PromptTokens))
 	if len(citations) > 0 { // 非流式：x-rag-citations 顶层扩展字段
 		c.JSON(200, gin.H{
 			"id": resp.ID, "object": resp.Object, "model": resp.Model,
@@ -215,7 +222,7 @@ func lastUserQuery(msgs []openaiclient.Message) string {
 }
 
 // stream SSE 流式（OpenAI chunk 透传 + x-metering/x-quota 扩展事件）。
-func (h *ChatHandler) stream(c *gin.Context, resolved *llm.Resolved, req *openaiclient.ChatRequest, citations []rag.Citation) {
+func (h *ChatHandler) stream(c *gin.Context, resolved *llm.Resolved, req *openaiclient.ChatRequest, citations []rag.Citation, estimated int64) {
 	ctx := c.Request.Context()
 	sse := web.NewSSE(c)
 	defer sse.Close()
@@ -252,6 +259,8 @@ func (h *ChatHandler) stream(c *gin.Context, resolved *llm.Resolved, req *openai
 	if usage.TotalTokens == 0 { // 上游未回 usage：按聚合文本估算
 		usage.PromptTokens = 0
 	}
+	// 流式完成后按实际用量退款
+	h.handleChatRefund(ctx, c, resolved, estimated, int64(usage.PromptTokens))
 	h.recordUsage(c, resolved, usage.PromptTokens, usage.CompletionTokens)
 
 	sse.WriteEvent("x-metering", gin.H{
@@ -305,4 +314,25 @@ func parseModality(s string) []string {
 		return []string{}
 	}
 	return strings.Split(s, ",")
+}
+
+// handleChatRefund chat 完成后按估算差额退款（异步非阻塞）。
+// estimated 预扣量，actual 实际用量（失败时为 0）。
+func (h *ChatHandler) handleChatRefund(ctx context.Context, c *gin.Context, resolved *llm.Resolved, estimated, actual int64) {
+	if estimated <= actual {
+		return
+	}
+	refund := estimated - actual
+	tid, _ := tenant.FromSafe(ctx)
+	if tid == 0 {
+		return
+	}
+	// 异步退款，不阻塞响应
+	go func() {
+		bg := context.Background()
+		if err := h.Quota.Refund(bg, tid, redisx.DimLLMTokensIn, refund); err != nil {
+			slog.Warn("handleChatRefund failed",
+				"err", err, "tenantID", tid, "dimension", redisx.DimLLMTokensIn, "refund", refund)
+		}
+	}()
 }

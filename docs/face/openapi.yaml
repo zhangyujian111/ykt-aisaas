@@ -1,0 +1,265 @@
+openapi: 3.1.0
+info:
+  title: aisaas Face Detection Internal API
+  version: 1.1.0
+  description: |
+    ykt-aisaas 提供给 xiaozhi-server-go 的**人脸检测 + 5 点关键点提取**内部 API。
+
+    **v1 范围**：detect（人脸位置 + 置信度）+ 5 个关键点（左眼/右眼/鼻/左嘴/右嘴）。
+    **v1 不做**：人脸识别 / 主人识别 / embedding / profile CRUD。
+
+    **所有端点位于 `/internal/xiaozhi/v1/face/*`，需要满足：**
+    - `X-Internal-Token` 请求头（loopback/内网 token，由部署时配置）
+    - `X-Device-Id` 请求头（设备 ID，由 InternalDeviceMiddleware 注入）
+
+    **限流/计量：**
+    - 每次 `detect` 扣 1 个 quota（dimension=detect_frames）
+    - 超额返回 `429 RATE_LIMIT`
+
+    **配套文档：**
+    - 协议规范：`xiaozhi-server-go/docs/protocol/vision-servo-v1.md`
+    - ESP32 固件文档：`xiaozhi-server-go/docs/firmware/esp32-vision-tracking.md`
+    - 部署手册：`ykt-aisaas/docs/face/deployment.md`
+
+servers:
+  - url: http://127.0.0.1:8080/internal/xiaozhi/v1
+    description: 本机开发
+  - url: https://aisaas.internal.example.com/internal/xiaozhi/v1
+    description: 内网部署
+
+tags:
+  - name: face
+    description: 人脸检测（v1：detect + 5 点 keypoints，无识别）
+
+security:
+  - InternalToken: []
+  - DeviceId: []
+
+paths:
+  /face/detect:
+    post:
+      tags: [face]
+      summary: 实时人脸检测
+      description: |
+        从 JPEG 图片检测所有人脸位置 + 提取 5 点关键点（左眼/右眼/鼻/左嘴角/右嘴角）。
+
+        **请求体格式**（重要）：
+        - raw JPEG bytes（Content-Type: image/jpeg）
+        - 前 4 字节为 `frame_crc`（u32 BE，来自 xiaozhi-server-go 的 camera_frame binary envelope §2.3）
+        - 剩余字节为纯 JPEG（不允许 EXIF GPS）
+
+        **响应**：
+        - 200：返回 detections 数组（每张人脸含 bbox + confidence + 5 个 keypoint）
+        - 400：参数错误（图片为空/格式错误）
+        - 401：缺 X-Internal-Token
+        - 403：缺 X-Device-Id
+        - 429：quota 超限
+        - 500：检测失败（模型未加载/推理错误）
+
+        **v1 不返回**任何 PII（无 profile_id / display_name / 任何身份信息）。
+      requestBody:
+        required: true
+        content:
+          image/jpeg:
+            schema:
+              type: string
+              format: binary
+              description: '[4B frame_crc BE][N bytes JPEG]'
+            examples:
+              with_frame:
+                summary: 正常请求
+                value: |
+                  <binary: 4-byte CRC + JPEG file>
+      responses:
+        '200':
+          description: 检测成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetectResponse'
+              examples:
+                one_face:
+                  summary: 检测到 1 张人脸
+                  value:
+                    hit: true
+                    detections:
+                      - faceId: 1
+                        boundingBox: [140, 140, 160, 160]
+                        confidence: 0.95
+                        keypoints:
+                          - {x: 180, y: 200}  # 左眼
+                          - {x: 260, y: 200}  # 右眼
+                          - {x: 220, y: 230}  # 鼻
+                          - {x: 200, y: 260}  # 左嘴角
+                          - {x: 240, y: 260}  # 右嘴角
+                    latencyMs: 76
+                    modelUsed: "onnx-scrfd10g-v1"
+                no_face:
+                  summary: 无人脸
+                  value:
+                    hit: false
+                    detections: []
+                    latencyMs: 45
+                    modelUsed: "onnx-scrfd10g-v1"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimit'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    InternalToken:
+      type: apiKey
+      in: header
+      name: X-Internal-Token
+      description: 内网 token（部署时配置，所有内部 API 共享）
+    DeviceId:
+      type: apiKey
+      in: header
+      name: X-Device-Id
+      description: |
+        设备 ID。由 `InternalDeviceMiddleware` 校验后注入到 context；
+        也可显式通过 header 传入。
+
+  schemas:
+    DetectResponse:
+      type: object
+      required: [hit, detections, latencyMs, modelUsed]
+      properties:
+        hit:
+          type: boolean
+          description: 是否有检测到（detections 非空）
+          example: true
+        detections:
+          type: array
+          items:
+            $ref: '#/components/schemas/Detection'
+        latencyMs:
+          type: integer
+          description: 服务端处理耗时（毫秒）
+          example: 76
+        modelUsed:
+          type: string
+          description: 使用的 detector 名称（用于日志/监控）
+          example: "onnx-scrfd10g-v1"
+
+    Detection:
+      type: object
+      required: [faceId, boundingBox, confidence, keypoints]
+      properties:
+        faceId:
+          type: integer
+          format: int64
+          description: 当前帧内人脸 ID（per-frame 跟踪 ID，v1 不持久化）
+          example: 1
+        boundingBox:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items:
+            type: integer
+          description: '[x, y, w, h] 像素坐标'
+          example: [140, 140, 160, 160]
+        confidence:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: 检测置信度
+          example: 0.95
+        keypoints:
+          type: array
+          minItems: 5
+          maxItems: 5
+          description: |
+            5 点关键点（顺序固定）：
+            0=左眼, 1=右眼, 2=鼻, 3=左嘴角, 4=右嘴角
+          items:
+            $ref: '#/components/schemas/Keypoint'
+
+    Keypoint:
+      type: object
+      required: [x, y]
+      properties:
+        x:
+          type: number
+          format: double
+          description: 像素 X 坐标
+          example: 220
+        y:
+          type: number
+          format: double
+          description: 像素 Y 坐标
+          example: 230
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - INVALID_PARAM
+            - INVALID_JSON
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - NOT_FOUND
+            - RATE_LIMIT
+            - INTERNAL
+          example: "INVALID_PARAM"
+        message:
+          type: string
+          example: "缺少 X-Device-Id"
+
+  responses:
+    BadRequest:
+      description: 参数错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: "INVALID_PARAM"
+            message: "图片数据为空"
+    Unauthorized:
+      description: 缺 X-Internal-Token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: "UNAUTHORIZED"
+            message: "missing X-Internal-Token"
+    Forbidden:
+      description: 缺 X-Device-Id
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: "FORBIDDEN"
+            message: "missing X-Device-Id"
+    RateLimit:
+      description: 限流 / quota 超限
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: "RATE_LIMIT"
+            message: "quota exceeded for detect_frames"
+    InternalError:
+      description: 检测失败（模型未加载/推理错误）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: "INTERNAL"
+            message: "face detection: model not initialized"

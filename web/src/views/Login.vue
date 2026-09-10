@@ -37,9 +37,16 @@ async function doLogin() {
   loading.value = true
   try {
     const d = await api.login({ username: f.username, password: f.password })
-    localStorage.setItem('token', d.token)
-    localStorage.setItem('nickname', d.user.nickname || d.user.username)
-    router.push('/devices')
+    localStorage.setItem('token', d.accessToken)
+    localStorage.setItem('username', d.user.username)
+    const nick = d.user.nickname || d.user.username
+    // 后端 nickname 字段若是占位 '????' 则用 username
+    localStorage.setItem('nickname', /^\?+$/.test(nick) ? d.user.username : nick)
+    // 同步设置默认 dev API Key（/api/v1/* Bearer 鉴权用）
+    if (!localStorage.getItem('aisaas_bearer_key')) {
+      localStorage.setItem('aisaas_bearer_key', 'sk-aisaas-962101aa6a4c0af0d1b8447744c4bf12')
+    }
+    router.push('/dashboard')
   } catch (e) { ElMessage.error(e.message || '登录失败') } finally { loading.value = false }
 }
 async function doRegister() {

@@ -3,17 +3,23 @@ package portal
 
 import (
 	"context"
+	"crypto/rsa"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
 	"ykt.dev/aisaas/internal/billing"
+	"ykt.dev/aisaas/internal/platform/auth"
 	"ykt.dev/aisaas/internal/platform/errs"
 	"ykt.dev/aisaas/internal/platform/ids"
+	"ykt.dev/aisaas/internal/platform/redisx"
 )
 
 // UserDO ykt_aisaas_user（系统表）。
@@ -60,13 +66,20 @@ func (OrderDO) TableName() string { return "ykt_aisaas_recharge_order" }
 
 // Service 门户业务。
 type Service struct {
-	db      *gorm.DB
-	billing *billing.Service
-	jwtKey  []byte
+	db            *gorm.DB
+	billing       *billing.Service
+	rdb           *redisx.Client // 登录限流
+	jwtPublicKey  *rsa.PublicKey  // RS256 公钥验签
+	jwtPrivateKey *rsa.PrivateKey // RS256 私钥签发（仅 Login 使用）
 }
 
-func NewService(db *gorm.DB, b *billing.Service, jwtKey string) *Service {
-	return &Service{db: db, billing: b, jwtKey: []byte(jwtKey)}
+// NewService 构造。jwtPublicKey 用于验签，jwtPrivateKey 用于签发（可为 nil，仅 Login 需要）。
+// rdb 必须非 nil，用于登录限流。
+func NewService(db *gorm.DB, b *billing.Service, rdb *redisx.Client, jwtPublicKey *rsa.PublicKey, jwtPrivateKey *rsa.PrivateKey) *Service {
+	if rdb == nil {
+		panic("portal.NewService: rdb is required for login rate limiting")
+	}
+	return &Service{db: db, billing: b, rdb: rdb, jwtPublicKey: jwtPublicKey, jwtPrivateKey: jwtPrivateKey}
 }
 
 // ---- 认证 ----
@@ -91,40 +104,88 @@ func (s *Service) Register(ctx context.Context, username, password, nickname str
 	return u, nil
 }
 
-// Login 登录 → JWT。
-func (s *Service) Login(ctx context.Context, username, password string) (token string, u *UserDO, err error) {
+// LoginResp 登录响应（双 token）。
+type LoginResp struct {
+	AccessToken  string  `json:"accessToken"`
+	RefreshToken string  `json:"refreshToken"`
+	TokenType    string  `json:"tokenType"`
+	ExpiresIn    int64   `json:"expiresIn"` // seconds
+	User         *UserDO `json:"user"`
+}
+
+// Login 登录 → RS256 JWT 双 token。
+func (s *Service) Login(c *gin.Context, username, password string) (*LoginResp, error) {
+	ctx := c.Request.Context()
+	if s.jwtPrivateKey == nil {
+		return nil, errs.New(errs.Internal, "JWT 私钥未配置")
+	}
+
+	// 入口限流
+	ip := clientIP(c)
+	if !auth.LoginRateLimit(ctx, s.rdb, ip, username, 0, 0) {
+		return nil, errs.New(errs.RateLimited, "登录尝试过多，请 15 分钟后重试")
+	}
+
 	var do UserDO
-	err = s.db.WithContext(ctx).Where("username = ? AND isDeleted = 0", username).Take(&do).Error
+	err := s.db.WithContext(ctx).Where("username = ? AND isDeleted = 0", username).Take(&do).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return "", nil, errs.New(errs.TokenInvalid, "用户名或密码错误")
+		return nil, errs.New(errs.TokenInvalid, "用户名或密码错误")
 	}
 	if err != nil {
-		return "", nil, errs.Wrap(errs.Internal, err)
+		return nil, errs.Wrap(errs.Internal, err)
 	}
 	if bcrypt.CompareHashAndPassword([]byte(do.Password), []byte(password)) != nil {
-		return "", nil, errs.New(errs.TokenInvalid, "用户名或密码错误")
+		// 登录失败，记录失败次数
+		auth.LoginFailRecord(ctx, s.rdb, ip, username, 0)
+		return nil, errs.New(errs.TokenInvalid, "用户名或密码错误")
 	}
+
+	// 登录成功，重置失败计数
+	auth.LoginFailReset(ctx, s.rdb, ip, username)
 	_ = s.db.WithContext(ctx).Model(&UserDO{}).Where("id = ?", do.ID).
 		Update("lastLoginTime", time.Now()).Error
 
+	// access token: 15min
+	accessExp := 15 * time.Minute
 	claims := jwt.MapClaims{
 		"uid": do.ID, "username": do.Username,
-		"exp": time.Now().Add(72 * time.Hour).Unix(),
+		"exp": time.Now().Add(accessExp).Unix(),
+		"ref": do.ID % 10000,
 	}
-	t, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.jwtKey)
+	accessToken, err := jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(s.jwtPrivateKey)
 	if err != nil {
-		return "", nil, errs.Wrap(errs.Internal, err)
+		return nil, errs.Wrap(errs.Internal, err)
 	}
-	return t, &do, nil
+
+	// refresh token: 7d
+	refreshClaims := jwt.MapClaims{
+		"uid": do.ID, "type": "refresh",
+		"exp": time.Now().Add(7 * 24 * time.Hour).Unix(),
+	}
+	refreshToken, err := jwt.NewWithClaims(jwt.SigningMethodRS256, refreshClaims).SignedString(s.jwtPrivateKey)
+	if err != nil {
+		return nil, errs.Wrap(errs.Internal, err)
+	}
+
+	return &LoginResp{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		TokenType:    "Bearer",
+		ExpiresIn:    int64(accessExp.Seconds()),
+		User:         &do,
+	}, nil
 }
 
-// ParseToken 校验 JWT → uid。
+// ParseToken 校验 RS256 JWT → uid。HS256/none 算法 token 被拒绝。
 func (s *Service) ParseToken(tokenStr string) (int64, error) {
+	if s.jwtPublicKey == nil {
+		return 0, errs.New(errs.Internal, "JWT 公钥未配置")
+	}
 	tok, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("bad alg")
+		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
-		return s.jwtKey, nil
+		return s.jwtPublicKey, nil
 	})
 	if err != nil || !tok.Valid {
 		return 0, errs.New(errs.TokenInvalid)
@@ -208,7 +269,11 @@ func (s *Service) Plans(ctx context.Context) ([]map[string]any, error) {
 		Table("ykt_aisaas_plan").
 		Where("status = 1 AND isDeleted = 0").Order("priceMonthly").
 		Find(&rows).Error
-	return rows, errs.Wrap(errs.Internal, err)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[DEBUG Plans] err=%v\n", err)
+		return nil, errs.Wrap(errs.Internal, err)
+	}
+	return rows, nil
 }
 
 // Subscribe 订阅套餐：校验设备归属 → 写 subscription → 更新 tenant 套餐/到期
@@ -312,9 +377,14 @@ func (s *Service) PayOrderMock(ctx context.Context, userID, orderID int64) (*Ord
 // MyOrders 我的充值订单。
 func (s *Service) MyOrders(ctx context.Context, userID int64) ([]*OrderDO, error) {
 	var out []*OrderDO
-	err := s.db.WithContext(ctx).Where("userId = ?", userID).
+	err := s.db.Session(&gorm.Session{SkipHooks: true, Context: ctx}).
+		Where("userId = ?", userID).
 		Order("id DESC").Limit(20).Find(&out).Error
-	return out, errs.Wrap(errs.Internal, err)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[DEBUG MyOrders] err=%v\n", err)
+		return nil, errs.Wrap(errs.Internal, err)
+	}
+	return out, nil
 }
 
 func isDup(err error) bool {
@@ -363,4 +433,20 @@ func parseQuotaJSON(s string) map[string]int64 {
 		}
 	}
 	return out
+}
+
+// clientIP 从 gin.Context 提取客户端 IP。
+func clientIP(c *gin.Context) string {
+	ip := c.ClientIP()
+	if ip != "" {
+		return ip
+	}
+	// 备用：尝试 X-Forwarded-For
+	if fwd := c.GetHeader("X-Forwarded-For"); fwd != "" {
+		if i := strings.Index(fwd, ","); i > 0 {
+			return strings.TrimSpace(fwd[:i])
+		}
+		return fwd
+	}
+	return ""
 }

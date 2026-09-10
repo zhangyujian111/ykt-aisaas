@@ -1,0 +1,14 @@
+*.exe
+*.exe~
+bin/
+out/
+*.test
+*.log
+logs/
+web/node_modules/
+web/dist/
+.git/
+.idea/
+.vscode/
+.DS_Store
+keys/

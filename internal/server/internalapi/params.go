@@ -16,3 +16,12 @@ func tenantIDParam(c *gin.Context) (int64, bool) {
 	}
 	return id, true
 }
+
+// QuotaRefundReq 配额退款请求。
+type QuotaRefundReq struct {
+	TenantID  int64  `json:"tenantId" binding:"required"`
+	Dimension string `json:"dimension" binding:"required"`
+	Estimated int64  `json:"estimated" binding:"required,min=0"` // 预扣量
+	Actual    int64  `json:"actual" binding:"required,min=0"`    // 实际用量
+	RequestID string `json:"requestId" binding:"required"`       // 溯源
+}

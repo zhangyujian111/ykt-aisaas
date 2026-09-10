@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"ykt.dev/aisaas/internal/platform/audit"
 	pcrypto "ykt.dev/aisaas/internal/platform/crypto"
 	"ykt.dev/aisaas/internal/platform/errs"
 	"ykt.dev/aisaas/internal/platform/redisx"
@@ -199,22 +200,51 @@ func Middleware(svc *Service, scope string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		plain := extractKey(c)
 		if plain == "" {
+			audit.Record(c.Request.Context(), audit.AuditEntry{
+				ActorType: "apikey", ActorIP: c.ClientIP(),
+				Action: "auth.fail", Result: "failure",
+				ErrorCode: "40101", ErrorMessage: "缺少 Authorization: Bearer sk-aisaas-...",
+			})
 			web.AbortOpenAI(c, errs.New(errs.InvalidAPIKey, "缺少 Authorization: Bearer sk-aisaas-..."))
 			return
 		}
 		bo, err := svc.Validate(c.Request.Context(), plain)
 		if err != nil {
+			audit.Record(c.Request.Context(), audit.AuditEntry{
+				ActorType: "apikey", ActorIP: c.ClientIP(),
+				Action: "auth.fail", Result: "failure",
+				ErrorCode: errCode(err), ErrorMessage: err.Error(),
+				ActionDetail: map[string]any{"keyPrefix": safeKeyPrefix(plain)},
+			})
 			web.AbortOpenAI(c, err)
 			return
 		}
 		if scope != "" && !bo.HasScope(scope) {
+			audit.Record(c.Request.Context(), audit.AuditEntry{
+				ActorType: "apikey", ActorID: fmt.Sprintf("%d", bo.ID),
+				TenantID: bo.TenantID, ActorIP: c.ClientIP(),
+				Action: "auth.fail", Result: "failure",
+				ErrorCode: "40302", ErrorMessage: "API Key 无 " + scope + " 权限",
+			})
 			web.AbortOpenAI(c, errs.New(errs.Forbidden, "API Key 无 "+scope+" 权限"))
 			return
 		}
 		if !bo.IPAllowed(c.ClientIP()) {
+			audit.Record(c.Request.Context(), audit.AuditEntry{
+				ActorType: "apikey", ActorID: fmt.Sprintf("%d", bo.ID),
+				TenantID: bo.TenantID, ActorIP: c.ClientIP(),
+				Action: "auth.fail", Result: "failure",
+				ErrorCode: "40103", ErrorMessage: "IP 不在白名单",
+			})
 			web.AbortOpenAI(c, errs.New(errs.IPNotAllowed))
 			return
 		}
+
+		// 鉴权成功
+		audit.Record(c.Request.Context(), audit.AuditEntry{
+			TenantID: bo.TenantID, ActorType: "apikey", ActorID: fmt.Sprintf("%d", bo.ID),
+			ActorIP: c.ClientIP(), Action: "auth.success", Result: "success",
+		})
 
 		ctx := tenant.With(c.Request.Context(), bo.TenantID)
 		ctx = context.WithValue(ctx, actorCtxKey{}, Actor{Type: "apikey", ID: bo.ID})
@@ -286,3 +316,20 @@ func parseJSONArr(s string) []string {
 var _ = slog.Info // 保持 import（简化版未用 slog 的编译保险）
 var _ = fmt.Sprintf
 var _ = http.StatusOK
+
+// errCode 从 error 提取错误码字符串。
+func errCode(err error) string {
+	var e *errs.Error
+	if errors.As(err, &e) {
+		return fmt.Sprintf("%d", e.Code)
+	}
+	return "unknown"
+}
+
+// safeKeyPrefix 安全提取 Key 前缀（脱敏）。
+func safeKeyPrefix(plain string) string {
+	if len(plain) > 16 {
+		return plain[:16]
+	}
+	return plain
+}

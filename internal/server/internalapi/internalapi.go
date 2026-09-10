@@ -6,6 +6,7 @@ import (
 
 	"ykt.dev/aisaas/internal/billing"
 	"ykt.dev/aisaas/internal/platform/errs"
+	"ykt.dev/aisaas/internal/platform/quota"
 	"ykt.dev/aisaas/internal/platform/tenant"
 	"ykt.dev/aisaas/internal/platform/web"
 	"ykt.dev/aisaas/internal/tenantm/apikey"
@@ -13,8 +14,9 @@ import (
 
 // Handler 内部接口。
 type Handler struct {
-	KeySvc  *apikey.Service
-	Billing *billing.Service
+	KeySvc   *apikey.Service
+	Billing  *billing.Service
+	QuotaSvc *quota.Guard
 }
 
 // IssueAPIKey POST /internal/api/v1/tenants/:tenantId/apikeys

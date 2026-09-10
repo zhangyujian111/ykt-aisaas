@@ -30,7 +30,7 @@ func (h *BillingHandler) Balance(c *gin.Context) {
 // Transactions GET /api/v1/billing/transactions?limit=20。
 func (h *BillingHandler) Transactions(c *gin.Context) {
 	tid, _ := tenant.FromSafe(c.Request.Context())
-	limit := intQuery(c, "limit", 20)
+	limit := intQueryBilling(c, "limit", 20)
 	txns, err := h.Svc.ListTxns(c.Request.Context(), tid, limit)
 	if err != nil {
 		web.Abort(c, err)
@@ -60,7 +60,7 @@ func (h *BillingHandler) UsageOverview(c *gin.Context) {
 	})
 }
 
-func intQuery(c *gin.Context, key string, def int) int {
+func intQueryBilling(c *gin.Context, key string, def int) int {
 	v := c.Query(key)
 	if v == "" {
 		return def

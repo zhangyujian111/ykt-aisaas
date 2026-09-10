@@ -1,0 +1,32 @@
+-- V5-SCIM: Add SCIM external ID column to sys_user table
+-- This enables SCIM-based user provisioning to track external IdP user IDs
+
+ALTER TABLE sys_user ADD COLUMN scim_external_id VARCHAR(255) DEFAULT NULL COMMENT 'SCIM external IdP user ID';
+
+-- Create index for faster lookups by SCIM external ID
+CREATE INDEX idx_sys_user_scim_external_id ON sys_user(scim_external_id);
+
+-- Create sys_group table for SCIM group provisioning
+CREATE TABLE IF NOT EXISTS sys_group (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    display_name VARCHAR(255) NOT NULL COMMENT 'Group display name',
+    external_id VARCHAR(255) DEFAULT NULL COMMENT 'SCIM external IdP group ID',
+    is_deleted TINYINT(1) DEFAULT 0 COMMENT 'Soft delete flag',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_sys_group_external_id (external_id),
+    INDEX idx_sys_group_display_name (display_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='SCIM group table';
+
+-- Create sys_user_group mapping table for group membership
+CREATE TABLE IF NOT EXISTS sys_user_group (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL COMMENT 'User ID',
+    group_id BIGINT NOT NULL COMMENT 'Group ID',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_user_group (user_id, group_id),
+    INDEX idx_sys_user_group_user_id (user_id),
+    INDEX idx_sys_user_group_group_id (group_id),
+    FOREIGN KEY (user_id) REFERENCES sys_user(id) ON DELETE CASCADE,
+    FOREIGN KEY (group_id) REFERENCES sys_group(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='User-group membership mapping';

@@ -44,12 +44,18 @@ func (h *Handler) Login(c *gin.Context) {
 		web.Abort(c, errs.New(errs.InvalidParam, err.Error()))
 		return
 	}
-	token, u, err := h.Svc.Login(c.Request.Context(), req.Username, req.Password)
+	resp, err := h.Svc.Login(c, req.Username, req.Password)
 	if err != nil {
 		web.Abort(c, err)
 		return
 	}
-	web.OK(c, gin.H{"token": token, "user": gin.H{"id": u.ID, "username": u.Username, "nickname": u.Nickname}})
+	web.OK(c, gin.H{
+		"accessToken":  resp.AccessToken,
+		"refreshToken": resp.RefreshToken,
+		"tokenType":    resp.TokenType,
+		"expiresIn":    resp.ExpiresIn,
+		"user":         gin.H{"id": resp.User.ID, "username": resp.User.Username, "nickname": resp.User.Nickname},
+	})
 }
 
 // JWTMiddleware Bearer JWT → userId 注入。

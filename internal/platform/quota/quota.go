@@ -4,9 +4,14 @@ package quota
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"math/rand"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"ykt.dev/aisaas/internal/platform/audit"
 	"ykt.dev/aisaas/internal/platform/auth"
 	"ykt.dev/aisaas/internal/platform/errs"
 	"ykt.dev/aisaas/internal/platform/redisx"
@@ -57,11 +62,31 @@ func (g *Guard) PrecheckDim(ctx context.Context, dim string, estimated int64) bo
 	if !ok {
 		return false
 	}
-	if _, err := g.Rdb.QuotaDeduct(ctx, tid, dim, estimated); err != nil {
+	remaining, err := g.Rdb.QuotaDeduct(ctx, tid, dim, estimated)
+	if err != nil {
 		if errors.Is(err, redisx.ErrQuotaExceeded) {
+			// 抽样 1/100 写审计日志
+			if rand.Intn(100) == 0 {
+				audit.Record(ctx, audit.AuditEntry{
+					TenantID: tid, ActorType: "apikey",
+					Action: "quota.check", ResourceType: "quota",
+					ResourceID: dim, Result: "failure",
+					ErrorCode: "40201", ErrorMessage: "配额不足",
+					ActionDetail: map[string]any{"dim": dim, "estimated": estimated},
+				})
+			}
 			return false
 		}
 		// Redis 故障：放行（最终一致，事后对账）
+	}
+	// 抽样 1/100 写审计日志
+	if rand.Intn(100) == 0 {
+		audit.Record(ctx, audit.AuditEntry{
+			TenantID: tid, ActorType: "apikey",
+			Action: "quota.check", ResourceType: "quota",
+			ResourceID: dim, Result: "success",
+			ActionDetail: map[string]any{"dim": dim, "estimated": estimated, "remaining": remaining},
+		})
 	}
 	return true
 }
@@ -86,4 +111,35 @@ func (g *Guard) Middleware(est func(*gin.Context) int64) gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// Refund 配额退款（DecrBy Redis used 计数器）。
+// amount 必须 > 0。
+// 实现 pending 标记机制：写 pending key → incr 配额 → 删除 pending key。
+// 失败时 pending key 保留，供后续 reconciler 处理（P1 阶段）。
+func (g *Guard) Refund(ctx context.Context, tenantID int64, dim string, amount int64) error {
+	if amount <= 0 {
+		return nil
+	}
+
+	// 生成 pending key（24h TTL）
+	pendingKey := fmt.Sprintf("aisaas:quota:refund:%d:%s:%d", tenantID, dim, time.Now().UnixNano())
+	if err := g.Rdb.Set(ctx, pendingKey, "1", 24*time.Hour).Err(); err != nil {
+		return fmt.Errorf("mark pending: %w", err)
+	}
+
+	// 执行退款（IncrBy）
+	ym := time.Now().Format("200601")
+	if err := g.Rdb.IncrBy(ctx, redisx.KeyQuotaUsed(tenantID, dim, ym), amount).Err(); err != nil {
+		// 退款失败，pending key 保留供 reconciler 处理
+		slog.Error("refund incrby failed, pending remains for reconciler",
+			"key", pendingKey, "tenantID", tenantID, "dim", dim, "amount", amount, "err", err)
+		return fmt.Errorf("incr quota: %w", err)
+	}
+
+	// 成功，删除 pending key
+	if err := g.Rdb.Del(ctx, pendingKey).Err(); err != nil {
+		slog.Warn("refund pending cleanup failed", "key", pendingKey, "err", err)
+	}
+	return nil
 }

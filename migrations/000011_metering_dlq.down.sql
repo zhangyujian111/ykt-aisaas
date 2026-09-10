@@ -1,0 +1,1 @@
+DROP TABLE IF EXISTS ykt_aisaas_metering_dlq;

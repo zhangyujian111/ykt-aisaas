@@ -4,11 +4,15 @@ package metering
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
+	"os"
 	"runtime"
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
 	"ykt.dev/aisaas/internal/platform/config"
@@ -71,34 +75,63 @@ type Consumer interface {
 	Consume(ctx context.Context, tenantID int64, bizType string, costCents int64, refID string)
 }
 
+const (
+	streamName = "aisaas:metering:stream"
+)
+
 // Recorder 计量记录器。
 type Recorder struct {
-	rdb  *redisx.Client
-	db   *gorm.DB
-	ch   chan Record
-	cfg  config.Metering
-	wg   sync.WaitGroup
-	prc  Pricer
-	cons Consumer
+	rdb             *redisx.Client
+	db              *gorm.DB
+	cfg             config.Metering
+	streamCfg       StreamConfig
+	ch              chan Record       // fallback channel（Stream 不可用时）
+	fallbackChannel chan Record       // XADD 失败时的 fallback（10s 重试）
+	wg              sync.WaitGroup
+	stopCh          chan struct{}
+	prc             Pricer
+	cons            Consumer
+	dlq             *DLQWorker
 }
 
 // NewRecorder 启动后台批量落库 goroutine。
-func NewRecorder(rdb *redisx.Client, db *gorm.DB, cfg config.Metering) (*Recorder, error) {
+func NewRecorder(rdb *redisx.Client, db *gorm.DB, cfg config.Metering, streamCfg ...StreamConfig) (*Recorder, error) {
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = 200
 	}
 	if cfg.FlushSec <= 0 {
 		cfg.FlushSec = 3
 	}
-	r := &Recorder{
-		rdb: rdb, db: db, cfg: cfg,
-		ch: make(chan Record, cfg.BatchSize*8),
+	sc := DefaultStreamConfig()
+	if len(streamCfg) > 0 {
+		sc = streamCfg[0]
 	}
+	r := &Recorder{
+		rdb: rdb, db: db, cfg: cfg, streamCfg: sc,
+		ch:              make(chan Record, cfg.BatchSize*8),
+		fallbackChannel: make(chan Record, cfg.BatchSize*2),
+		stopCh:          make(chan struct{}),
+		dlq:             NewDLQWorker(db, rdb, sc.DLQMaxRetries),
+	}
+
+	// 创建 consumer group（幂等）
+	ctx := context.Background()
+	if sc.UseStream {
+		if err := rdb.XGroupCreateMkStream(ctx, streamName, sc.ConsumerGroup, "0").Err(); err != nil {
+			if err.Error() != "BUSYGROUP Consumer Group name already exists" {
+				slog.Warn("metering xgroup create", "err", err)
+			}
+		}
+	}
+
 	n := min(2, runtime.NumCPU())
 	for i := 0; i < n; i++ {
 		r.wg.Add(1)
 		go r.worker()
 	}
+	// fallback channel 独立消费
+	r.wg.Add(1)
+	go r.fallbackWorker()
 	return r, nil
 }
 
@@ -131,12 +164,34 @@ func (r *Recorder) costFloat(rec Record) float64 {
 	}
 }
 
-// Record 记录用量（非阻塞；队列满时丢弃并告警，不阻塞业务）。
+// Record 记录用量（非阻塞；Stream 失败时 fallback 到 channel，不阻塞业务）。
 func (r *Recorder) Record(ctx context.Context, rec Record) {
 	// Redis 实时计数（失败不阻塞）
 	ym := time.Now().Format("200601")
 	_ = r.rdb.IncrBy(ctx, redisx.KeyQuotaUsed(rec.TenantID, rec.Dimension, ym), rec.Amount).Err()
 
+	if r.streamCfg.UseStream {
+		// XADD 到 Redis Stream
+		payload, _ := json.Marshal(rec)
+		err := r.rdb.XAdd(ctx, &redis.XAddArgs{
+			Stream: streamName,
+			MaxLen: r.streamCfg.StreamMaxLen,
+			Approx: true,
+			Values: map[string]interface{}{"payload": string(payload)},
+		}).Err()
+		if err != nil {
+			// Fallback：写内存 channel（10s 重试回 Stream）
+			select {
+			case r.fallbackChannel <- rec:
+			default:
+				slog.Warn("metering fallback channel full, record dropped", "tenantId", rec.TenantID, "dim", rec.Dimension)
+			}
+			slog.Warn("metering xadd failed, fallback to channel", "err", err)
+		}
+		return
+	}
+
+	// 旧 channel 模式（useStream=false）
 	select {
 	case r.ch <- rec:
 	default:
@@ -157,6 +212,77 @@ func (r *Recorder) RecordWithCtx(ctx context.Context, rec Record) {
 
 func (r *Recorder) worker() {
 	defer r.wg.Done()
+
+	if r.streamCfg.UseStream {
+		r.streamWorker()
+		return
+	}
+	r.channelWorker()
+}
+
+// streamWorker XREADGROUP 消费 Redis Stream。
+func (r *Recorder) streamWorker() {
+	consumerName := fmt.Sprintf("consumer-%d", os.Getpid())
+	ctx := context.Background()
+
+	buf := make([]Record, 0, r.cfg.BatchSize)
+	tick := time.NewTicker(time.Duration(r.cfg.FlushSec) * time.Second)
+	defer tick.Stop()
+
+	flush := func() {
+		if len(buf) == 0 {
+			return
+		}
+		r.flushBatch(context.Background(), buf)
+		buf = buf[:0]
+	}
+
+	for {
+		select {
+		case <-r.stopCh:
+			flush()
+			return
+		case <-tick.C:
+			flush()
+		default:
+			streams, err := r.rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
+				Group:    r.streamCfg.ConsumerGroup,
+				Consumer: consumerName,
+				Streams:  []string{streamName, ">"},
+				Count:    int64(r.cfg.BatchSize),
+				Block:    time.Second,
+			}).Result()
+			if err != nil {
+				if err != redis.Nil {
+					slog.Error("metering xreadgroup error", "err", err)
+				}
+				continue
+			}
+			for _, stream := range streams {
+				for _, msg := range stream.Messages {
+					payload, ok := msg.Values["payload"].(string)
+					if !ok {
+						continue
+					}
+					var rec Record
+					if err := json.Unmarshal([]byte(payload), &rec); err != nil {
+						slog.Warn("metering unmarshal failed", "err", err)
+						continue
+					}
+					buf = append(buf, rec)
+					// XACK 确认
+					r.rdb.XAck(ctx, streamName, r.streamCfg.ConsumerGroup, msg.ID)
+				}
+			}
+			if len(buf) >= r.cfg.BatchSize {
+				flush()
+			}
+		}
+	}
+}
+
+// channelWorker 原 channel 消费模式（useStream=false 时使用）。
+func (r *Recorder) channelWorker() {
 	tick := time.NewTicker(time.Duration(r.cfg.FlushSec) * time.Second)
 	defer tick.Stop()
 
@@ -165,46 +291,15 @@ func (r *Recorder) worker() {
 		if len(buf) == 0 {
 			return
 		}
-		rows := make([]usageRow, len(buf))
-		for i, rec := range buf {
-			rows[i] = usageRow{
-				ID: ids.Next(), TenantID: rec.TenantID, APIKeyID: rec.APIKeyID,
-				BizType: rec.BizType, Dimension: rec.Dimension, Amount: rec.Amount,
-				ModelID: rec.ModelID, RequestID: rec.RequestID, Status: rec.Status,
-				CostCents: r.costCents(rec),
-			}
-		}
-		// usage_detail 含 tenantId 但写入时已显式带值；跳过租户插件填充
-		if err := r.db.Session(&gorm.Session{SkipHooks: true, Context: context.Background()}).
-			Table("ykt_aisaas_usage_detail").Create(&rows).Error; err != nil {
-			slog.Error("metering flush failed", "rows", len(rows), "err", err)
-			return
-		}
-		// 扣费：浮点累计后取整（单条 0.1 分级费用不能提前截断）
-		if r.cons != nil {
-			type aggKey struct {
-				tid   int64
-				biz   string
-				model string
-			}
-			agg := map[aggKey]float64{}
-			for _, rec := range buf {
-				if rec.Status == 1 {
-					agg[aggKey{rec.TenantID, rec.BizType, rec.ModelID}] += r.costFloat(rec)
-				}
-			}
-			bg := context.Background()
-			for k, cents := range agg {
-				if cents >= 1 {
-					r.cons.Consume(bg, k.tid, k.biz, int64(cents), "batch:"+time.Now().Format("150405"))
-				}
-			}
-		}
+		r.flushBatch(context.Background(), buf)
 		buf = buf[:0]
 	}
 
 	for {
 		select {
+		case <-r.stopCh:
+			flush()
+			return
 		case rec, ok := <-r.ch:
 			if !ok {
 				flush()
@@ -220,8 +315,79 @@ func (r *Recorder) worker() {
 	}
 }
 
+// fallbackWorker XADD 失败时 fallback channel 的独立消费（10s 重试回 Stream）。
+func (r *Recorder) fallbackWorker() {
+	defer r.wg.Done()
+	ctx := context.Background()
+
+	for {
+		select {
+		case <-r.stopCh:
+			return
+		case rec := <-r.fallbackChannel:
+			// 等待 10s 后重试 XADD
+			time.Sleep(10 * time.Second)
+			payload, _ := json.Marshal(rec)
+			err := r.rdb.XAdd(ctx, &redis.XAddArgs{
+				Stream: streamName,
+				MaxLen: r.streamCfg.StreamMaxLen,
+				Approx: true,
+				Values: map[string]interface{}{"payload": string(payload)},
+			}).Err()
+			if err != nil {
+				// 重试失败：直接落库
+				r.flushBatch(ctx, []Record{rec})
+			}
+		}
+	}
+}
+
+// flushBatch 批量落库 + 扣费。
+func (r *Recorder) flushBatch(ctx context.Context, buf []Record) {
+	rows := make([]usageRow, len(buf))
+	for i, rec := range buf {
+		rows[i] = usageRow{
+			ID: ids.Next(), TenantID: rec.TenantID, APIKeyID: rec.APIKeyID,
+			BizType: rec.BizType, Dimension: rec.Dimension, Amount: rec.Amount,
+			ModelID: rec.ModelID, RequestID: rec.RequestID, Status: rec.Status,
+			CostCents: r.costCents(rec),
+		}
+	}
+	// usage_detail 含 tenantId 但写入时已显式带值；跳过租户插件填充
+	if err := r.db.Session(&gorm.Session{SkipHooks: true, Context: ctx}).
+		Table("ykt_aisaas_usage_detail").Create(&rows).Error; err != nil {
+		slog.Error("metering flush failed", "rows", len(rows), "err", err)
+		// 落库失败 → DLQ
+		for i, rec := range buf {
+			_ = r.dlq.Push(ctx, fmt.Sprintf("%d", rows[i].ID), rec, err.Error())
+		}
+		return
+	}
+	// 扣费：浮点累计后取整（单条 0.1 分级费用不能提前截断）
+	if r.cons != nil {
+		type aggKey struct {
+			tid   int64
+			biz   string
+			model string
+		}
+		agg := map[aggKey]float64{}
+		for _, rec := range buf {
+			if rec.Status == 1 {
+				agg[aggKey{rec.TenantID, rec.BizType, rec.ModelID}] += r.costFloat(rec)
+			}
+		}
+		bg := context.Background()
+		for k, cents := range agg {
+			if cents >= 1 {
+				r.cons.Consume(bg, k.tid, k.biz, int64(cents), "batch:"+time.Now().Format("150405"))
+			}
+		}
+	}
+}
+
 // Close 排空并停止。
 func (r *Recorder) Close() {
+	close(r.stopCh)
 	close(r.ch)
 	r.wg.Wait()
 }
