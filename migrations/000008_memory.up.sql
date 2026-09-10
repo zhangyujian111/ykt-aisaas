@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS ykt_aisaas_memory_relation (
   weight               DECIMAL(3,2) NOT NULL DEFAULT 0.50 COMMENT '关系权重 0~1',
 
   -- 关系属性（JSON）
-  properties           COMMENT '关系属性 {since, frequency, context, ...}',
+  properties           JSON          DEFAULT NULL COMMENT '关系属性 {since, frequency, context, ...}',
 
   -- 溯源
   sourceMessageId      BIGINT       DEFAULT NULL COMMENT '来源消息 ID',
