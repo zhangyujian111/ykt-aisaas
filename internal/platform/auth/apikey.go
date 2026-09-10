@@ -261,10 +261,10 @@ func InternalMiddleware(token string) gin.HandlerFunc {
 			web.Abort(c, errs.New(errs.TokenInvalid, "internal token 错误"))
 			return
 		}
-		// 同物理机约束：仅允许 loopback（配置层可放开）
+		// 同物理机约束：仅允许 loopback 或 RFC1918 私有网（Docker/K8s 网络）
 		ip := c.ClientIP()
-		if ip != "127.0.0.1" && ip != "::1" {
-			web.Abort(c, errs.New(errs.IPNotAllowed, "internal API 仅限本机调用"))
+		if !isAllowedInternalIP(ip) {
+			web.Abort(c, errs.New(errs.IPNotAllowed, "internal API 仅限本机或私有网调用"))
 			return
 		}
 		ctx := tenant.With(c.Request.Context(), 1) // 内部租户 ID = 1
@@ -276,6 +276,24 @@ func InternalMiddleware(token string) gin.HandlerFunc {
 }
 
 type unlimitedKey struct{}
+
+// isAllowedInternalIP \u68c0\u67e5 IP \u662f\u5426\u5728\u5141\u8bb8\u7684\u5185\u90e8\u8c03\u7528\u8303\u56f4\uff08loopback + RFC1918 \u79c1\u6709\u7f51\uff09\u3002
+func isAllowedInternalIP(ip string) bool {
+	if ip == "" {
+		return false
+	}
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	if parsed.IsLoopback() {
+		return true
+	}
+	if parsed.IsPrivate() {
+		return true
+	}
+	return false
+}
 
 // UnlimitedFrom ctx 中读取"不限配额"标记。
 func UnlimitedFrom(ctx context.Context) bool {
