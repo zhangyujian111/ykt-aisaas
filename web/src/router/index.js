@@ -5,8 +5,8 @@ const guard = (to, next) => {
   else next()
 }
 
-export default createRouter({
-  history: createWebHistory(),
+const router = createRouter({
+  history: createWebHistory('/portal/'),
   routes: [
     { path: '/', redirect: '/dashboard' },
     {
@@ -32,5 +32,10 @@ export default createRouter({
         { path: 'orders', component: () => import('../views/Orders.vue'), meta: { title: '订单' } },
       ]
     },
+    { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
   ],
 })
+
+router.beforeEach((to, _from, next) => guard(to, next))
+
+export default router
