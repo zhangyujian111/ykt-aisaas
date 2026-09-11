@@ -13,7 +13,8 @@ portal.interceptors.response.use(
 )
 
 // internal (X-Internal-Token) — 运营接口（Models / OSS / Templates CRUD）
-const internalToken = 'dev-internal-token'
+// 与 /opt/ykt-deploy/.env 的 INTERNAL_TOKEN 一致
+const internalToken = 'ZiDP0A8VkG7DC5n9dCAT5EoJywWl9wyMZWb5Ms-bxlfmV-GvDCyrV5yq3Bb3TkE3'
 const admin = axios.create({ baseURL: '/internal/api', timeout: 30000 })
 admin.interceptors.request.use((c) => {
   c.headers['X-Internal-Token'] = localStorage.getItem('aisaas_internal_token') || internalToken
