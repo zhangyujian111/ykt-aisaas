@@ -261,9 +261,15 @@ func InternalMiddleware(token string) gin.HandlerFunc {
 			web.Abort(c, errs.New(errs.TokenInvalid, "internal token 错误"))
 			return
 		}
-		// 同物理机约束：仅允许 loopback 或 RFC1918 私有网（Docker/K8s 网络）
-		ip := c.ClientIP()
-		if !isAllowedInternalIP(ip) {
+		// 同物理机约束：仅允许 loopback 或 RFC1918 私有网（Docker/K8s 网络）。
+		// 用 RemoteAddr 而不是 ClientIP()，因为边缘 nginx 会注入 X-Real-IP=公网 IP，
+		// 那是浏览器看到的真实 IP；socket 端点（RemoteAddr）才是 docker bridge 上的 nginx 容器 IP。
+		host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
+		if err != nil {
+			web.Abort(c, errs.New(errs.IPNotAllowed, "internal API 无法识别来源 IP"))
+			return
+		}
+		if !isAllowedInternalIP(host) {
 			web.Abort(c, errs.New(errs.IPNotAllowed, "internal API 仅限本机或私有网调用"))
 			return
 		}
