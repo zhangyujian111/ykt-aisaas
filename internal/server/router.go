@@ -235,6 +235,8 @@ func NewRouter(d *Deps) *gin.Engine {
 	pg.POST("/auth/register", portalH.Register)
 	pg.POST("/auth/login", portalH.Login)
 	authed := pg.Group("", portalH.JWTMiddleware())
+	authed.GET("/me", portalH.Me)
+	authed.POST("/auth/change-password", portalH.ChangePassword)
 	authed.GET("/devices", portalH.MyDevices)
 	authed.POST("/devices/bind", portalH.BindDevice)
 	authed.GET("/plans", portalH.Plans)

@@ -188,3 +188,35 @@ func (h *Handler) MyOrders(c *gin.Context) {
 	}
 	web.OK(c, orders)
 }
+
+// Me GET /portal/api/v1/me。
+func (h *Handler) Me(c *gin.Context) {
+	u, err := h.Svc.GetUser(c.Request.Context(), uid(c))
+	if err != nil {
+		web.Abort(c, err)
+		return
+	}
+	web.OK(c, gin.H{
+		"id":       u.ID,
+		"username": u.Username,
+		"nickname": u.Nickname,
+		"phone":    u.Phone,
+	})
+}
+
+// ChangePassword POST /portal/api/v1/auth/change-password。
+func (h *Handler) ChangePassword(c *gin.Context) {
+	var req struct {
+		OldPassword string `json:"oldPassword" binding:"required"`
+		NewPassword string `json:"newPassword" binding:"required,min=6"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		web.Abort(c, errs.New(errs.InvalidParam, err.Error()))
+		return
+	}
+	if err := h.Svc.ChangePassword(c.Request.Context(), uid(c), req.OldPassword, req.NewPassword); err != nil {
+		web.Abort(c, err)
+		return
+	}
+	web.OK(c, gin.H{"changed": true})
+}

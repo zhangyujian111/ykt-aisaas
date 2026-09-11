@@ -106,7 +106,6 @@ func (h *PromptTemplateHandler) Create(c *gin.Context) {
 	}
 	row := map[string]any{
 		"id":          ids.Next(),
-		"tenantId":    req.TenantID,
 		"templateKey": req.TemplateKey,
 		"name":        req.Name,
 		"category":    req.Category,
@@ -115,6 +114,9 @@ func (h *PromptTemplateHandler) Create(c *gin.Context) {
 		"variables":   req.Variables,
 		"isDefault":   boolToInt(req.IsDefault),
 		"status":      req.Status,
+	}
+	if req.TenantID != nil {
+		row["tenantId"] = *req.TenantID
 	}
 	if err := h.DB.WithContext(c.Request.Context()).Table("ykt_aisaas_prompt_template").Create(row).Error; err != nil {
 		c.JSON(http.StatusOK, gin.H{"code": 50001, "message": err.Error()})

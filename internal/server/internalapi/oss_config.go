@@ -126,7 +126,6 @@ func (h *OssConfigHandler) Create(c *gin.Context) {
 	}
 	row := map[string]any{
 		"id":         ids.Next(),
-		"tenantId":   req.TenantID,
 		"provider":   req.Provider,
 		"configName": req.ConfigName,
 		"configDesc": req.ConfigDesc,
@@ -138,6 +137,9 @@ func (h *OssConfigHandler) Create(c *gin.Context) {
 		"pathPrefix": req.PathPrefix,
 		"isDefault":  boolToInt(req.IsDefault),
 		"status":     req.Status,
+	}
+	if req.TenantID != nil {
+		row["tenantId"] = *req.TenantID
 	}
 	if err := h.DB.WithContext(c.Request.Context()).Table("ykt_aisaas_oss_config").Create(row).Error; err != nil {
 		c.JSON(http.StatusOK, gin.H{"code": 50001, "message": err.Error()})

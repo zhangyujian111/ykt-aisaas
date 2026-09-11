@@ -104,6 +104,43 @@ func (s *Service) Register(ctx context.Context, username, password, nickname str
 	return u, nil
 }
 
+// GetUser 按 id 取用户（/me 专用）。
+func (s *Service) GetUser(ctx context.Context, id int64) (*UserDO, error) {
+	var u UserDO
+	if err := s.db.WithContext(ctx).Where("id = ? AND isDeleted = 0", id).Take(&u).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.New(errs.ResourceNotFound, "用户不存在")
+		}
+		return nil, errs.Wrap(errs.Internal, err)
+	}
+	return &u, nil
+}
+
+// ChangePassword 修改密码。
+func (s *Service) ChangePassword(ctx context.Context, id int64, oldPwd, newPwd string) error {
+	if len(newPwd) < 6 {
+		return errs.New(errs.InvalidParam, "新密码≥6位")
+	}
+	var u UserDO
+	if err := s.db.WithContext(ctx).Where("id = ? AND isDeleted = 0", id).Take(&u).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errs.New(errs.ResourceNotFound, "用户不存在")
+		}
+		return errs.Wrap(errs.Internal, err)
+	}
+	if bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(oldPwd)) != nil {
+		return errs.New(errs.InvalidParam, "原密码错误")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPwd), bcrypt.DefaultCost)
+	if err != nil {
+		return errs.Wrap(errs.Internal, err)
+	}
+	if err := s.db.WithContext(ctx).Model(&u).Update("password", string(hash)).Error; err != nil {
+		return errs.Wrap(errs.Internal, err)
+	}
+	return nil
+}
+
 // LoginResp 登录响应（双 token）。
 type LoginResp struct {
 	AccessToken  string  `json:"accessToken"`
