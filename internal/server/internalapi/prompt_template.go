@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"text/template"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -205,6 +206,10 @@ func (h *PromptTemplateHandler) Preview(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"code": 40002, "message": "invalid id"})
 		return
 	}
+	var req struct {
+		Variables map[string]any `json:"variables"`
+	}
+	_ = c.ShouldBindJSON(&req) // 允许空 body
 	var row map[string]any
 	if err := h.DB.WithContext(c.Request.Context()).
 		Table("ykt_aisaas_prompt_template").
@@ -213,11 +218,35 @@ func (h *PromptTemplateHandler) Preview(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"code": 50004, "message": "模板不存在"})
 		return
 	}
+	content := toString(row["content"])
+	rendered, err := renderGoTemplate(content, req.Variables)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 50001, "message": "template render: " + err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "success",
 		"data": gin.H{
-			"content": toString(row["content"]),
+			"content":   rendered,
+			"rendered":  true,
+			"variables": req.Variables,
 		},
 	})
+}
+
+// renderGoTemplate 用 text/template 渲染 {{.var}} 占位符。
+func renderGoTemplate(tpl string, vars map[string]any) (string, error) {
+	if !strings.Contains(tpl, "{{") {
+		return tpl, nil
+	}
+	parsed, err := template.New("prompt").Option("missingkey=zero").Parse(tpl)
+	if err != nil {
+		return "", err
+	}
+	var buf strings.Builder
+	if err := parsed.Execute(&buf, vars); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
