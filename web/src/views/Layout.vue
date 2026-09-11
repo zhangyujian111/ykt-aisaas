@@ -9,20 +9,29 @@
         <el-menu-item-group title="总览">
           <el-menu-item index="/dashboard"><el-icon><DataBoard /></el-icon><span>总览</span></el-menu-item>
           <el-menu-item index="/billing"><el-icon><Money /></el-icon><span>账单</span></el-menu-item>
+          <el-menu-item index="/chat"><el-icon><ChatDotRound /></el-icon><span>Web 对话</span></el-menu-item>
         </el-menu-item-group>
+
         <el-menu-item-group title="AI 平台">
-          <el-menu-item index="/models"><el-icon><Box /></el-icon><span>模型</span></el-menu-item>
+          <el-menu-item index="/models"><el-icon><Box /></el-icon><span>模型配置</span></el-menu-item>
+          <el-menu-item index="/oss"><el-icon><FolderOpened /></el-icon><span>对象存储 OSS</span></el-menu-item>
+          <el-menu-item index="/kb"><el-icon><Document /></el-icon><span>知识库</span></el-menu-item>
           <el-menu-item index="/apikeys"><el-icon><Key /></el-icon><span>API Key</span></el-menu-item>
+          <el-menu-item index="/templates"><el-icon><Memo /></el-icon><span>Prompt 模板</span></el-menu-item>
           <el-menu-item index="/personas"><el-icon><UserFilled /></el-icon><span>人设</span></el-menu-item>
           <el-menu-item index="/memory"><el-icon><Notebook /></el-icon><span>记忆</span></el-menu-item>
           <el-menu-item index="/sessions"><el-icon><Timer /></el-icon><span>会话</span></el-menu-item>
           <el-menu-item index="/mcp"><el-icon><Tools /></el-icon><span>MCP 工具</span></el-menu-item>
-          <el-menu-item index="/kb"><el-icon><Document /></el-icon><span>知识库</span></el-menu-item>
           <el-menu-item index="/anomaly"><el-icon><AlarmClock /></el-icon><span>异常规则</span></el-menu-item>
         </el-menu-item-group>
+
         <el-menu-item-group title="租户">
           <el-menu-item index="/devices"><el-icon><Cpu /></el-icon><span>设备</span></el-menu-item>
           <el-menu-item index="/orders"><el-icon><List /></el-icon><span>订单</span></el-menu-item>
+        </el-menu-item-group>
+
+        <el-menu-item-group title="账号">
+          <el-menu-item index="/account"><el-icon><Setting /></el-icon><span>个人设置</span></el-menu-item>
         </el-menu-item-group>
       </el-menu>
     </el-aside>
@@ -40,6 +49,9 @@
               <el-dropdown-menu>
                 <el-dropdown-item disabled>
                   <div style="font-size:12px;color:#94a3b8">@{{ username }}</div>
+                </el-dropdown-item>
+                <el-dropdown-item @click="router.push('/account')">
+                  <el-icon><Setting /></el-icon> 个人设置
                 </el-dropdown-item>
                 <el-dropdown-item divided command="logout">
                   <el-icon><SwitchButton /></el-icon> 退出登录
@@ -59,14 +71,13 @@ import { useRouter } from 'vue-router'
 import { computed, onMounted } from 'vue'
 import {
   DataBoard, Money, Box, Key, UserFilled, Notebook, Timer, Tools, Document, AlarmClock, Cpu, List,
-  MagicStick, ArrowDown, SwitchButton
+  MagicStick, ArrowDown, SwitchButton, ChatDotRound, FolderOpened, Memo, Setting
 } from '@element-plus/icons-vue'
 
 const router = useRouter()
 
 const username = computed(() => localStorage.getItem('username') || '')
 const nickname = computed(() => localStorage.getItem('nickname') || '')
-// 显示名优先级：真实 nickname（非 ????） > username
 const displayName = computed(() => {
   const n = nickname.value.trim()
   if (n && !/^\?+$/.test(n)) return n

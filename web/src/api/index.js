@@ -12,7 +12,7 @@ portal.interceptors.response.use(
   (e) => Promise.reject(e.response?.data || { message: e.message })
 )
 
-// internal (X-Internal-Token) — 运营接口（Models CRUD / APIKey 发放）
+// internal (X-Internal-Token) — 运营接口（Models / OSS / Templates CRUD）
 const internalToken = 'dev-internal-token'
 const admin = axios.create({ baseURL: '/internal/api', timeout: 30000 })
 admin.interceptors.request.use((c) => {
@@ -24,7 +24,7 @@ admin.interceptors.response.use(
   (e) => Promise.reject(e.response?.data || { message: e.message })
 )
 
-// bearer API（/api/v1/*）— 模型/记忆/会话/persona/mcp
+// bearer API（/api/v1/*）— 模型/记忆/会话/persona/mcp/kb
 const bearer = axios.create({ baseURL: '/api/v1', timeout: 30000 })
 bearer.interceptors.request.use((c) => {
   c.headers.Authorization = 'Bearer ' + (localStorage.getItem('aisaas_bearer_key') || '')
@@ -41,7 +41,7 @@ bearer.interceptors.response.use(
 )
 
 export default {
-  // portal
+  // ---- portal ----
   register: (d) => portal.post('/auth/register', d),
   login: (d) => portal.post('/auth/login', d),
   devices: () => portal.get('/devices'),
@@ -51,36 +51,70 @@ export default {
   recharge: (tid, amountCents) => portal.post(`/devices/${tid}/recharge`, { amountCents }),
   payMock: (id) => portal.post(`/orders/${id}/pay-mock`),
   orders: () => portal.get('/orders'),
+  accountMe: () => portal.get('/me'),
+  changePassword: (d) => portal.post('/auth/change-password', d),
 
-  // models (internal API)
-  models: () => admin.get('/v1/models'),
+  // ---- models (internal API) ----
+  models: (params) => admin.get('/v1/models', { params }),
   createModel: (d) => admin.post('/v1/models', d),
   updateModel: (id, d) => admin.put(`/v1/models/${id}`, d),
   deleteModel: (id) => admin.delete(`/v1/models/${id}`),
   testModel: (d) => admin.post('/v1/models/test', d),
 
-  // apikeys (Bearer) — GET /api/v1/apikeys（用 sk-aisaas 自动带 tenant 过滤）
+  // ---- oss config (internal API) ----
+  ossConfigs: () => admin.get('/v1/oss'),
+  createOss: (d) => admin.post('/v1/oss', d),
+  updateOss: (id, d) => admin.put(`/v1/oss/${id}`, d),
+  deleteOss: (id) => admin.delete(`/v1/oss/${id}`),
+
+  // ---- prompt templates (internal API) ----
+  templates: (params) => admin.get('/v1/templates', { params }),
+  createTemplate: (d) => admin.post('/v1/templates', d),
+  updateTemplate: (id, d) => admin.put(`/v1/templates/${id}`, d),
+  deleteTemplate: (id) => admin.delete(`/v1/templates/${id}`),
+
+  // ---- apikeys (Bearer) ----
   apikeys: () => bearer.get('/apikeys'),
 
-  // personas (Bearer) — 需要 ?deviceId=
+  // ---- personas (Bearer) ----
   personas: (deviceId) => bearer.get(`/personas`, { params: { deviceId } }),
   createPersona: (d) => bearer.post('/personas', d),
   updatePersona: (id, d) => bearer.put(`/personas/${id}`, d),
   deletePersona: (id) => bearer.delete(`/personas/${id}`),
 
-  // memory — 后端路由: GET /memories/:deviceId/messages
+  // ---- memory ----
   memory: (deviceId) => bearer.get(`/memories/${deviceId}/messages`),
+  extractMemory: (deviceId) => bearer.post(`/memories/${deviceId}/extract`),
+  summarizeMemory: (deviceId) => bearer.post(`/memories/${deviceId}/summarize`),
+  memoryGraph: (deviceId) => bearer.get(`/memories/${deviceId}`),
 
-  // sessions — 后端新增 GET /sessions/:deviceId 路由
+  // ---- sessions ----
   sessions: (deviceId) => bearer.get(`/sessions/${deviceId}`),
+  createSession: (deviceId) => bearer.post(`/sessions/${deviceId}`),
+  sessionHistory: (deviceId, sessionId) => bearer.get(`/sessions/${deviceId}/history`, { params: { sessionId } }),
+  endSession: (deviceId, sessionId) => bearer.post(`/sessions/${deviceId}/${sessionId}/end`),
 
-  // mcp
+  // ---- mcp ----
   mcpTools: () => bearer.get('/mcp/tools'),
 
-  // billing
+  // ---- billing ----
   balance: () => bearer.get('/billing/balance'),
   usageOverview: () => bearer.get('/usage/overview'),
 
-  // knowledge base
+  // ---- knowledge base (Bearer) ----
   knowledgeBases: () => bearer.get('/knowledge-bases'),
+  createKb: (d) => bearer.post('/knowledge-bases', d),
+  deleteKb: (id) => bearer.delete(`/knowledge-bases/${id}`),
+  kbDocs: (id) => bearer.get(`/knowledge-bases/${id}/documents`),
+  uploadDoc: (id, formData) => bearer.post(`/knowledge-bases/${id}/documents`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  }),
+  kbSearch: (id, query, topK = 5) => bearer.post(`/knowledge-bases/${id}/search`, { query, topK }),
+
+  // ---- chat (Bearer — OpenAI compatible) ----
+  chat: (body) => bearer.post('/chat/completions', body),
+  chatStream: (body) => bearer.post('/chat/completions', body, { responseType: 'stream' }),
+
+  // ---- models list for chat UI ----
+  modelList: () => bearer.get('/models'),
 }

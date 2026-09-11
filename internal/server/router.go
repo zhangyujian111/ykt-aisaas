@@ -200,6 +200,21 @@ func NewRouter(d *Deps) *gin.Engine {
 	intg.DELETE("/models/:id", modelH.Delete)
 	intg.POST("/models/test", modelH.Test)
 
+	// OSS 对象存储配置 CRUD
+	ossH := &internalapi.OssConfigHandler{DB: d.DB, AESKey: d.Cfg.Crypto.AESKey}
+	intg.GET("/oss", ossH.List)
+	intg.POST("/oss", ossH.Create)
+	intg.PUT("/oss/:id", ossH.Update)
+	intg.DELETE("/oss/:id", ossH.Delete)
+
+	// Prompt 模板 CRUD
+	tplH := &internalapi.PromptTemplateHandler{DB: d.DB}
+	intg.GET("/templates", tplH.List)
+	intg.POST("/templates", tplH.Create)
+	intg.PUT("/templates/:id", tplH.Update)
+	intg.DELETE("/templates/:id", tplH.Delete)
+	intg.POST("/templates/:id/preview", tplH.Preview)
+
 	// xiaozhi-server 设备即租户通道：X-Device-Id 自动开户 + 独立计量计费
 	devg := r.Group("/internal/xiaozhi/v1", auth.InternalDeviceMiddleware(d.Cfg.Server.InternalToken, d.DeviceTenant))
 	devChat := v1.NewChatHandler(d.ChatSvc, d.Quota, d.Meter, d.RagRetriever, d.McpSvc)
