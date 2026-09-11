@@ -5,8 +5,10 @@
 package internalapi
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -103,6 +105,20 @@ func (h *PromptTemplateHandler) Create(c *gin.Context) {
 	}
 	if req.Status == 0 {
 		req.Status = 1
+	}
+	// variables 兼容两种入参：JSON 数组（如 `["a","b"]`）或逗号分隔字符串（如 `a,b`）。
+	// 数据库列类型为 JSON，必须保证写入的是合法 JSON 文本。
+	if req.Variables = strings.TrimSpace(req.Variables); req.Variables != "" && !strings.HasPrefix(req.Variables, "[") {
+		parts := strings.Split(req.Variables, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if v := strings.TrimSpace(p); v != "" {
+				out = append(out, v)
+			}
+		}
+		if b, err := json.Marshal(out); err == nil {
+			req.Variables = string(b)
+		}
 	}
 	row := map[string]any{
 		"id":          ids.Next(),
